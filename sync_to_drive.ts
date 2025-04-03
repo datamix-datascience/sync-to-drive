@@ -94,14 +94,13 @@ async function list_drive_files(folder_id: string): Promise<Map<string, { id: st
 async function ensure_folder(parent_id: string, folder_name: string): Promise<string> {
   core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   try {
-    core.info(`Checking if folder '${folder_name}' exists under '${parent_id}'`);
-    const q = `'${parent_id}' in parents '${folder_name}'`;  // Quote the folder name
-    core.info(`Query: ${q}`);
+    core.info(`Listing all files under '${parent_id}' to find '${folder_name}'`);
     const res = await drive.files.list({
-      q,
-      fields: "files(id, name, mimeType)",  // Include name and mimeType for filtering
+      q: `'${parent_id}' in parents`,  // Simplified: only filter by parent
+      fields: "files(id, name, mimeType)",
       spaces: "drive",
     });
+    core.info(`Files found under '${parent_id}': ${JSON.stringify(res.data.files)}`);
 
     const folders = res.data.files?.filter(file =>
       file.mimeType === "application/vnd.google-apps.folder" && file.name === folder_name
