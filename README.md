@@ -100,7 +100,7 @@ Place a `sync-config.json` file in the root of your target repository to define 
                node-version: "20"
 
            - name: sync_to_drive
-             uses: yourusername/sync-to-drive@v1
+             uses: datamix-datascience/sync-to-drive@v1
              with:
                credentials: ${{ secrets.DRIVE_CREDENTIALS }}
      ```
