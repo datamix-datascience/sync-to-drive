@@ -94,20 +94,20 @@ async function list_drive_files(folder_id: string): Promise<Map<string, { id: st
 async function ensure_folder(parent_id: string, folder_name: string): Promise<string> {
   core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   try {
-    core.info(`Listing all files under '${parent_id}' to find '${folder_name}'`);
+    core.info(`Listing all folders under '${parent_id}' to find '${folder_name}'`);
     const res = await drive.files.list({
-      q: `'${parent_id}' in parents`,  // Simplified: only filter by parent
+      q: `'${parent_id}' in parents`,
       fields: "files(id, name, mimeType)",
       spaces: "drive",
     });
     core.info(`Files found under '${parent_id}': ${JSON.stringify(res.data.files)}`);
 
-    const folders = res.data.files?.filter(file =>
+    const existingFolder = res.data.files?.find(file =>
       file.mimeType === "application/vnd.google-apps.folder" && file.name === folder_name
     );
-    if (folders && folders.length > 0) {
-      core.info(`Folder '${folder_name}' exists with ID: ${folders[0].id}`);
-      return folders[0].id!;
+    if (existingFolder && existingFolder.id) {
+      core.info(`Folder '${folder_name}' already exists with ID: ${existingFolder.id}`);
+      return existingFolder.id;
     }
 
     core.info(`Folder '${folder_name}' not found, creating it...`);
@@ -137,15 +137,19 @@ async function upload_file(file_path: string, folder_id: string, existing_file?:
   const media = { body: fs.createReadStream(file_path) };
 
   try {
-    if (existing_file) {
-      core.info(`Updating existing file: ${file_name} (ID: ${existing_file.id})`);
-      await drive.files.update({
+    if (existing_file && existing_file.id) {
+      core.info(`Updating existing file '${file_name}' (ID: ${existing_file.id})`);
+      const res = await drive.files.update({
         fileId: existing_file.id,
         media,
+        requestBody: {
+          name: file_name,
+        },
+        fields: "id",
       });
-      core.info(`Updated file: ${file_name}`);
+      core.info(`Updated file '${file_name}' (ID: ${res.data.id})`);
     } else {
-      core.info(`Creating new file: ${file_name} in folder ${folder_id}`);
+      core.info(`Creating new file '${file_name}' in folder ${folder_id}`);
       const res = await drive.files.create({
         requestBody: {
           name: file_name,
@@ -154,23 +158,13 @@ async function upload_file(file_path: string, folder_id: string, existing_file?:
         media,
         fields: "id",
       });
-      core.info(`Uploaded file: ${file_name} (ID: ${res.data.id})`);
+      core.info(`Uploaded file '${file_name}' (ID: ${res.data.id})`);
     }
   } catch (error: unknown) {
     const err = error as Error;
-    core.error(`Failed to upload ${file_name}: ${err.message}`);
+    core.error(`Failed to process '${file_name}': ${err.message}`);
     throw err;
   }
-}
-
-// Rename conflicting file
-async function rename_conflict(file_id: string, old_name: string) {
-  const new_name = `__my__.${old_name}`;
-  await drive.files.update({
-    fileId: file_id,
-    requestBody: { name: new_name },
-  });
-  core.info(`Renamed conflicting file to: ${new_name}`);
 }
 
 // Delete untracked file
@@ -230,14 +224,8 @@ async function sync_to_drive() {
         if (!drive_file) {
           await upload_file(local_file.path, current_folder_id);
         } else if (drive_file.hash !== local_file.hash) {
-          if (target.on_conflict === "rename") {
-            await rename_conflict(drive_file.id, file_name);
-            await upload_file(local_file.path, current_folder_id);
-          } else if (target.on_conflict === "override") {
-            await upload_file(local_file.path, current_folder_id, {
-              id: drive_file.id,
-              name: file_name,
-            });
+          if (target.on_conflict === "rename" || target.on_conflict === "override") {
+            await upload_file(local_file.path, current_folder_id, { id: drive_file.id, name: file_name });
           }
         }
         drive_files.delete(file_name);
