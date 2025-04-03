@@ -250,12 +250,15 @@ async function upload_file(file_path: string, folder_id: string, existing_file?:
 // Delete untracked file or folder with error handling
 async function delete_untracked(id: string, name: string, isFolder: boolean = false): Promise<boolean> {
   try {
-    await drive.files.delete({ fileId: id });
-    core.info(`Deleted untracked ${isFolder ? "folder" : "file"}: ${name}`);
+    await drive.files.update({
+      fileId: id,
+      requestBody: { trashed: true },
+    });
+    core.info(`Moved untracked ${isFolder ? "folder" : "file"} to Trash: ${name}`);
     return true;
   } catch (error: unknown) {
     const err = error as any;
-    core.warning(`Failed to delete untracked ${isFolder ? "folder" : "file"} '${name}' (ID: ${id}): ${err.message}`);
+    core.warning(`Failed to trash untracked ${isFolder ? "folder" : "file"} '${name}' (ID: ${id}): ${err.message}`);
     return false;
   }
 }
