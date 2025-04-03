@@ -17,7 +17,7 @@ interface SyncConfig {
 interface DriveTarget {
   drive_folder_id: string;
   drive_url: string;
-  on_untrack: "ignore" | "remove";  // Removed on_conflict
+  on_untrack: "ignore" | "remove";
 }
 
 interface FileInfo {
@@ -85,19 +85,45 @@ async function list_local_files(root_dir: string): Promise<FileInfo[]> {
   return files;
 }
 
-// List Drive files recursively
-async function list_drive_files(folder_id: string): Promise<Map<string, { id: string; hash: string }>> {
+// Recursively list all Drive files under a folder
+async function list_drive_files_recursively(
+  folder_id: string,
+  folder_map: Map<string, string>,
+  base_path: string = ""
+): Promise<Map<string, { id: string; hash: string }>> {
   const file_map = new Map<string, { id: string; hash: string }>();
-  const res = await drive.files.list({
-    q: `'${folder_id}' in parents`,
-    fields: "files(id, name, md5Checksum)",
-  }) as { data: DriveFilesListResponse };
+  let allFiles: DriveFile[] = [];
+  let nextPageToken: string | undefined;
 
-  for (const file of res.data.files || []) {
-    if (file.name && file.id) {
-      file_map.set(file.name, { id: file.id, hash: file.md5Checksum || "" });
+  // List files in current folder
+  do {
+    const res = await drive.files.list({
+      q: `'${folder_id}' in parents`,
+      fields: "nextPageToken, files(id, name, mimeType, md5Checksum)",
+      spaces: "drive",
+      pageToken: nextPageToken,
+      pageSize: 1000,
+    }) as { data: DriveFilesListResponse };
+
+    allFiles = allFiles.concat(res.data.files || []);
+    nextPageToken = res.data.nextPageToken;
+  } while (nextPageToken);
+
+  for (const file of allFiles) {
+    if (!file.name || !file.id) continue;
+    const relative_path = base_path ? path.join(base_path, file.name) : file.name;
+
+    if (file.mimeType === "application/vnd.google-apps.folder") {
+      // Recursively list subfolder contents
+      const subfolder_files = await list_drive_files_recursively(file.id, folder_map, relative_path);
+      for (const [sub_path, sub_file] of subfolder_files) {
+        file_map.set(sub_path, sub_file);
+      }
+    } else {
+      file_map.set(relative_path, { id: file.id, hash: file.md5Checksum || "" });
     }
   }
+
   return file_map;
 }
 
@@ -106,7 +132,7 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
   core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   try {
     let allFiles: DriveFile[] = [];
-    let nextPageToken: string | undefined = undefined;
+    let nextPageToken: string | undefined;
 
     do {
       core.info(`Listing files under '${parent_id}' (pageToken: ${nextPageToken || 'none'})`);
@@ -236,16 +262,15 @@ async function sync_to_drive() {
   for (const target of config.targets.forks) {
     core.info(`Processing target: ${JSON.stringify(target)}`);
     const folder_id = target.drive_folder_id;
-    const drive_files = await list_drive_files(folder_id);
+    const folder_map = await build_folder_structure(folder_id, local_files);
+    const drive_files = await list_drive_files_recursively(folder_id, folder_map);
     const drive_link = `https://drive.google.com/drive/folders/${folder_id}`;
     core.setOutput("link", drive_link);
 
     try {
-      // Build folder structure once
-      const folder_map = await build_folder_structure(folder_id, local_files);
       core.info(`Folder structure built: ${JSON.stringify([...folder_map])}`);
+      core.info(`Existing Drive files: ${JSON.stringify([...drive_files])}`);
 
-      // Sync files
       const local_file_map = new Map<string, FileInfo>();
       for (const file of local_files) {
         local_file_map.set(file.relative_path, file);
@@ -255,20 +280,20 @@ async function sync_to_drive() {
         const file_name = path.basename(relative_path);
         const dir_path = path.dirname(relative_path) || "";
         const target_folder_id = folder_map.get(dir_path) || folder_id;
-        const drive_file = drive_files.get(file_name);
+        const drive_file = drive_files.get(relative_path);  // Use full path
 
         if (!drive_file) {
           await upload_file(local_file.path, target_folder_id);
         } else if (drive_file.hash !== local_file.hash) {
           await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
         }
-        drive_files.delete(file_name);
+        drive_files.delete(relative_path);
       }
 
       if (drive_files.size > 0) {
         if (target.on_untrack === "remove") {
-          for (const [file_name, file_info] of drive_files) {
-            await delete_untracked(file_info.id, file_name);
+          for (const [file_path, file_info] of drive_files) {
+            await delete_untracked(file_info.id, file_path);
           }
         } else {
           core.info(`Leaving ${drive_files.size} untracked files in folder ${folder_id}`);
