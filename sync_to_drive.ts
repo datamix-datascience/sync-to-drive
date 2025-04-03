@@ -7,18 +7,6 @@ import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { glob } from "glob";
 
-interface DriveFile {
-  id?: string;
-  name?: string;
-  mimeType?: string;
-  md5Checksum?: string;  // For files with content
-}
-
-interface DriveFilesListResponse {
-  files?: DriveFile[];
-  nextPageToken?: string;
-}
-
 // Config types
 interface SyncConfig {
   source: { repo: string };
@@ -29,14 +17,25 @@ interface SyncConfig {
 interface DriveTarget {
   drive_folder_id: string;
   drive_url: string;
-  on_conflict: "rename" | "override";
-  on_untrack: "ignore" | "remove";
+  on_untrack: "ignore" | "remove";  // Removed on_conflict
 }
 
 interface FileInfo {
   path: string;
   hash: string;
   relative_path: string;
+}
+
+interface DriveFile {
+  id?: string;
+  name?: string;
+  mimeType?: string;
+  md5Checksum?: string;
+}
+
+interface DriveFilesListResponse {
+  files?: DriveFile[];
+  nextPageToken?: string;
 }
 
 // Load config from target repo
@@ -92,7 +91,7 @@ async function list_drive_files(folder_id: string): Promise<Map<string, { id: st
   const res = await drive.files.list({
     q: `'${folder_id}' in parents`,
     fields: "files(id, name, md5Checksum)",
-  });
+  }) as { data: DriveFilesListResponse };
 
   for (const file of res.data.files || []) {
     if (file.name && file.id) {
@@ -117,7 +116,7 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
         spaces: "drive",
         pageToken: nextPageToken,
         pageSize: 1000,
-      }) as { data: DriveFilesListResponse };  // Explicit type assertion
+      }) as { data: DriveFilesListResponse };
 
       allFiles = allFiles.concat(res.data.files || []);
       nextPageToken = res.data.nextPageToken;
@@ -155,6 +154,39 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
   }
 }
 
+// Build folder structure once
+async function build_folder_structure(root_folder_id: string, local_files: FileInfo[]): Promise<Map<string, string>> {
+  const folder_map = new Map<string, string>();  // Path -> Folder ID
+  folder_map.set("", root_folder_id);  // Root path maps to root folder
+
+  const unique_paths = new Set<string>();
+  for (const file of local_files) {
+    const parts = file.relative_path.split(path.sep);
+    let current_path = "";
+    for (let i = 0; i < parts.length - 1; i++) {
+      current_path = current_path ? path.join(current_path, parts[i]) : parts[i];
+      unique_paths.add(current_path);
+    }
+  }
+
+  for (const folder_path of Array.from(unique_paths).sort()) {
+    const parts = folder_path.split(path.sep);
+    let current_folder_id = root_folder_id;
+    let current_path = "";
+    for (const part of parts) {
+      current_path = current_path ? path.join(current_path, part) : part;
+      if (!folder_map.has(current_path)) {
+        current_folder_id = await ensure_folder(current_folder_id, part);
+        folder_map.set(current_path, current_folder_id);
+      } else {
+        current_folder_id = folder_map.get(current_path)!;
+      }
+    }
+  }
+
+  return folder_map;
+}
+
 // Upload or update file
 async function upload_file(file_path: string, folder_id: string, existing_file?: { id: string; name: string }) {
   const file_name = path.basename(file_path);
@@ -166,19 +198,14 @@ async function upload_file(file_path: string, folder_id: string, existing_file?:
       const res = await drive.files.update({
         fileId: existing_file.id,
         media,
-        requestBody: {
-          name: file_name,
-        },
+        requestBody: { name: file_name },
         fields: "id",
       });
       core.info(`Updated file '${file_name}' (ID: ${res.data.id})`);
     } else {
       core.info(`Creating new file '${file_name}' in folder ${folder_id}`);
       const res = await drive.files.create({
-        requestBody: {
-          name: file_name,
-          parents: [folder_id],
-        },
+        requestBody: { name: file_name, parents: [folder_id] },
         media,
         fields: "id",
       });
@@ -214,22 +241,11 @@ async function sync_to_drive() {
     core.setOutput("link", drive_link);
 
     try {
-      if (drive_files.size === 0) {
-        core.info(`Folder ${folder_id} is empty, performing initial sync`);
-        for (const file of local_files) {
-          const parts = file.relative_path.split(path.sep);
-          let current_folder_id = folder_id;
+      // Build folder structure once
+      const folder_map = await build_folder_structure(folder_id, local_files);
+      core.info(`Folder structure built: ${JSON.stringify([...folder_map])}`);
 
-          for (let i = 0; i < parts.length - 1; i++) {
-            current_folder_id = await ensure_folder(current_folder_id, parts[i]);
-          }
-          await upload_file(file.path, current_folder_id);
-        }
-        core.info(`Initial sync completed for folder ${folder_id}`);
-        continue;
-      }
-
-      // Non-empty sync: compare hashes
+      // Sync files
       const local_file_map = new Map<string, FileInfo>();
       for (const file of local_files) {
         local_file_map.set(file.relative_path, file);
@@ -237,20 +253,14 @@ async function sync_to_drive() {
 
       for (const [relative_path, local_file] of local_file_map) {
         const file_name = path.basename(relative_path);
+        const dir_path = path.dirname(relative_path) || "";
+        const target_folder_id = folder_map.get(dir_path) || folder_id;
         const drive_file = drive_files.get(file_name);
 
-        const parts = local_file.relative_path.split(path.sep);
-        let current_folder_id = folder_id;
-        for (let i = 0; i < parts.length - 1; i++) {
-          current_folder_id = await ensure_folder(current_folder_id, parts[i]);
-        }
-
         if (!drive_file) {
-          await upload_file(local_file.path, current_folder_id);
+          await upload_file(local_file.path, target_folder_id);
         } else if (drive_file.hash !== local_file.hash) {
-          if (target.on_conflict === "rename" || target.on_conflict === "override") {
-            await upload_file(local_file.path, current_folder_id, { id: drive_file.id, name: file_name });
-          }
+          await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
         }
         drive_files.delete(file_name);
       }
