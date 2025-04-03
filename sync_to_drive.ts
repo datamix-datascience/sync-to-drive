@@ -85,17 +85,19 @@ async function list_local_files(root_dir: string): Promise<FileInfo[]> {
   return files;
 }
 
-// Recursively list all Drive files under a folder
+// Recursively list all Drive files and folders under a folder
 async function list_drive_files_recursively(
   folder_id: string,
-  folder_map: Map<string, string>,
   base_path: string = ""
-): Promise<Map<string, { id: string; hash: string }>> {
+): Promise<{
+  files: Map<string, { id: string; hash: string }>;
+  folders: Map<string, string>;
+}> {
   const file_map = new Map<string, { id: string; hash: string }>();
+  const folder_map = new Map<string, string>();
   let allFiles: DriveFile[] = [];
   let nextPageToken: string | undefined;
 
-  // List files in current folder
   do {
     const res = await drive.files.list({
       q: `'${folder_id}' in parents`,
@@ -114,17 +116,20 @@ async function list_drive_files_recursively(
     const relative_path = base_path ? path.join(base_path, file.name) : file.name;
 
     if (file.mimeType === "application/vnd.google-apps.folder") {
-      // Recursively list subfolder contents
-      const subfolder_files = await list_drive_files_recursively(file.id, folder_map, relative_path);
-      for (const [sub_path, sub_file] of subfolder_files) {
+      folder_map.set(relative_path, file.id);
+      const subfolder_data = await list_drive_files_recursively(file.id, relative_path);
+      for (const [sub_path, sub_file] of subfolder_data.files) {
         file_map.set(sub_path, sub_file);
+      }
+      for (const [sub_path, sub_id] of subfolder_data.folders) {
+        folder_map.set(sub_path, sub_id);
       }
     } else {
       file_map.set(relative_path, { id: file.id, hash: file.md5Checksum || "" });
     }
   }
 
-  return file_map;
+  return { files: file_map, folders: folder_map };
 }
 
 // Ensure folder exists in Drive
@@ -182,8 +187,8 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
 
 // Build folder structure once
 async function build_folder_structure(root_folder_id: string, local_files: FileInfo[]): Promise<Map<string, string>> {
-  const folder_map = new Map<string, string>();  // Path -> Folder ID
-  folder_map.set("", root_folder_id);  // Root path maps to root folder
+  const folder_map = new Map<string, string>();
+  folder_map.set("", root_folder_id);
 
   const unique_paths = new Set<string>();
   for (const file of local_files) {
@@ -244,10 +249,10 @@ async function upload_file(file_path: string, folder_id: string, existing_file?:
   }
 }
 
-// Delete untracked file
-async function delete_untracked(file_id: string, file_name: string) {
-  await drive.files.delete({ fileId: file_id });
-  core.info(`Deleted untracked file: ${file_name}`);
+// Delete untracked file or folder
+async function delete_untracked(id: string, name: string, isFolder: boolean = false) {
+  await drive.files.delete({ fileId: id });
+  core.info(`Deleted untracked ${isFolder ? "folder" : "file"}: ${name}`);
 }
 
 // Main sync function
@@ -263,13 +268,14 @@ async function sync_to_drive() {
     core.info(`Processing target: ${JSON.stringify(target)}`);
     const folder_id = target.drive_folder_id;
     const folder_map = await build_folder_structure(folder_id, local_files);
-    const drive_files = await list_drive_files_recursively(folder_id, folder_map);
+    const { files: drive_files, folders: drive_folders } = await list_drive_files_recursively(folder_id);
     const drive_link = `https://drive.google.com/drive/folders/${folder_id}`;
     core.setOutput("link", drive_link);
 
     try {
       core.info(`Folder structure built: ${JSON.stringify([...folder_map])}`);
       core.info(`Existing Drive files: ${JSON.stringify([...drive_files])}`);
+      core.info(`Existing Drive folders: ${JSON.stringify([...drive_folders])}`);
 
       const local_file_map = new Map<string, FileInfo>();
       for (const file of local_files) {
@@ -280,7 +286,7 @@ async function sync_to_drive() {
         const file_name = path.basename(relative_path);
         const dir_path = path.dirname(relative_path) || "";
         const target_folder_id = folder_map.get(dir_path) || folder_id;
-        const drive_file = drive_files.get(relative_path);  // Use full path
+        const drive_file = drive_files.get(relative_path);
 
         if (!drive_file) {
           await upload_file(local_file.path, target_folder_id);
@@ -290,14 +296,19 @@ async function sync_to_drive() {
         drive_files.delete(relative_path);
       }
 
-      if (drive_files.size > 0) {
-        if (target.on_untrack === "remove") {
-          for (const [file_path, file_info] of drive_files) {
-            await delete_untracked(file_info.id, file_path);
-          }
-        } else {
-          core.info(`Leaving ${drive_files.size} untracked files in folder ${folder_id}`);
+      if (target.on_untrack === "remove") {
+        // Remove untracked files
+        for (const [file_path, file_info] of drive_files) {
+          await delete_untracked(file_info.id, file_path);
         }
+        // Remove untracked folders
+        for (const [folder_path, folder_id] of drive_folders) {
+          if (!folder_map.has(folder_path)) {
+            await delete_untracked(folder_id, folder_path, true);
+          }
+        }
+      } else if (drive_files.size > 0 || drive_folders.size > folder_map.size) {
+        core.info(`Leaving ${drive_files.size} untracked files and ${drive_folders.size - folder_map.size} untracked folders in folder ${folder_id}`);
       }
       core.info(`Sync completed for folder ${folder_id}`);
     } catch (error: unknown) {
