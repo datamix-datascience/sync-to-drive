@@ -98,15 +98,15 @@ async function list_local_files(root_dir: string): Promise<FileInfo[]> {
   return files;
 }
 
-// Accept ownership transfers (unchanged)
-async function accept_ownership_transfers(folder_id: string) {
+// Accept pending ownership transfers recursively
+async function accept_ownership_transfers(file_id: string) {
   try {
     let permissions: DrivePermission[] = [];
     let nextPageToken: string | undefined;
 
     do {
       const res = await drive.permissions.list({
-        fileId: folder_id,
+        fileId: file_id,
         fields: "nextPageToken, permissions(id, role, emailAddress, pendingOwner)",
         pageToken: nextPageToken,
       }) as { data: DrivePermissionsListResponse };
@@ -121,22 +121,33 @@ async function accept_ownership_transfers(folder_id: string) {
     );
 
     for (const perm of pendingPermissions) {
-      core.info(`Accepting ownership transfer for folder ${folder_id}, permission ID: ${perm.id}`);
+      core.info(`Accepting ownership transfer for item ${file_id}, permission ID: ${perm.id}`);
       await drive.permissions.update({
-        fileId: folder_id,
+        fileId: file_id,
         permissionId: perm.id,
         requestBody: { role: "owner" },
         transferOwnership: true,
       });
-      core.info(`Ownership accepted for folder ${folder_id}`);
+      core.info(`Ownership accepted for item ${file_id}`);
+    }
+
+    // Recursively check children
+    const children = await drive.files.list({
+      q: `'${file_id}' in parents`,
+      fields: "files(id, mimeType)",
+    });
+    for (const child of children.data.files || []) {
+      if (child.id) {
+        await accept_ownership_transfers(child.id);
+      }
     }
   } catch (error: unknown) {
     const err = error as any;
-    core.warning(`Failed to accept ownership transfers for folder ${folder_id}: ${err.message}`);
+    core.warning(`Failed to accept ownership transfers for item ${file_id}: ${err.message}`);
   }
 }
 
-// Enhanced list_drive_files_recursively with permissions logging
+// List Drive files recursively (unchanged except type)
 async function list_drive_files_recursively(
   folder_id: string,
   base_path: string = ""
@@ -168,7 +179,6 @@ async function list_drive_files_recursively(
     const relative_path = base_path ? path.join(base_path, file.name) : file.name;
     const owned = file.owners?.some(owner => owner.emailAddress === serviceAccountEmail) || false;
 
-    // Fetch permissions for this file/folder
     const permRes = await drive.permissions.list({
       fileId: file.id,
       fields: "permissions(id, role, emailAddress, pendingOwner)",
@@ -323,7 +333,7 @@ async function delete_untracked(id: string, name: string, isFolder: boolean = fa
   }
 }
 
-// Main sync function with enhanced logging
+// Main sync function
 async function sync_to_drive() {
   const local_files = await list_local_files(".");
   core.info(`Files to sync: ${JSON.stringify(local_files.map(f => f.relative_path))}`);
@@ -336,6 +346,7 @@ async function sync_to_drive() {
     core.info(`Processing target: ${JSON.stringify(target)}`);
     const folder_id = target.drive_folder_id;
 
+    // Accept ownership transfers for the root folder and all subitems
     await accept_ownership_transfers(folder_id);
 
     let folder_map: Map<string, string>;
@@ -382,11 +393,19 @@ async function sync_to_drive() {
     if (target.on_untrack === "remove") {
       for (const [file_path, file_info] of drive_files) {
         core.info(`Attempting to trash file '${file_path}' (ID: ${file_info.id}, Owned: ${file_info.owned}, Permissions: ${JSON.stringify(file_info.permissions)})`);
+        // Ensure ownership before trashing
+        if (!file_info.owned) {
+          core.info(`Requesting ownership transfer for '${file_path}' (ID: ${file_info.id}) - manual action required by current owner`);
+        }
         await delete_untracked(file_info.id, file_path);
       }
       for (const [folder_path, folder_info] of drive_folders) {
         if (!folder_map.has(folder_path)) {
           core.info(`Attempting to trash folder '${folder_path}' (ID: ${folder_info.id}, Owned: ${folder_info.owned}, Permissions: ${JSON.stringify(folder_info.permissions)})`);
+          // Ensure ownership before trashing
+          if (!folder_info.owned) {
+            core.info(`Requesting ownership transfer for '${folder_path}' (ID: ${folder_info.id}) - manual action required by current owner`);
+          }
           await delete_untracked(folder_info.id, folder_path, true);
         }
       }
