@@ -7,6 +7,18 @@ import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { glob } from "glob";
 
+interface DriveFile {
+  id?: string;
+  name?: string;
+  mimeType?: string;
+  md5Checksum?: string;  // For files with content
+}
+
+interface DriveFilesListResponse {
+  files?: DriveFile[];
+  nextPageToken?: string;
+}
+
 // Config types
 interface SyncConfig {
   source: { repo: string };
@@ -94,16 +106,28 @@ async function list_drive_files(folder_id: string): Promise<Map<string, { id: st
 async function ensure_folder(parent_id: string, folder_name: string): Promise<string> {
   core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   try {
-    core.info(`Listing all folders under '${parent_id}' to find '${folder_name}'`);
-    const res = await drive.files.list({
-      q: `'${parent_id}' in parents`,
-      fields: "files(id, name, mimeType)",
-      spaces: "drive",
-    });
-    core.info(`Files found under '${parent_id}': ${JSON.stringify(res.data.files)}`);
+    let allFiles: DriveFile[] = [];
+    let nextPageToken: string | undefined = undefined;
 
-    const existingFolder = res.data.files?.find(file =>
-      file.mimeType === "application/vnd.google-apps.folder" && file.name === folder_name
+    do {
+      core.info(`Listing files under '${parent_id}' (pageToken: ${nextPageToken || 'none'})`);
+      const res = await drive.files.list({
+        q: `'${parent_id}' in parents`,
+        fields: "nextPageToken, files(id, name, mimeType)",
+        spaces: "drive",
+        pageToken: nextPageToken,
+        pageSize: 1000,
+      }) as { data: DriveFilesListResponse };  // Explicit type assertion
+
+      allFiles = allFiles.concat(res.data.files || []);
+      nextPageToken = res.data.nextPageToken;
+    } while (nextPageToken);
+
+    core.info(`Total files found under '${parent_id}': ${JSON.stringify(allFiles)}`);
+
+    const existingFolder = allFiles.find(file =>
+      file.mimeType === "application/vnd.google-apps.folder" &&
+      file.name?.toLowerCase() === folder_name.toLowerCase()
     );
     if (existingFolder && existingFolder.id) {
       core.info(`Folder '${folder_name}' already exists with ID: ${existingFolder.id}`);
