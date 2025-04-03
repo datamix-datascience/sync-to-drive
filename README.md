@@ -136,4 +136,8 @@ To modify the action:
 2. Install dependencies: `npm install`.
 3. Edit `sync_to_drive.ts`.
 4. Build: `npm run build`.
-5. Push changes and tag a new release: `./release.sh v2` for `v2`
+5. Push changes and tag a new release:
+  ```
+  chmod +x release.sh
+  ./release.sh v2
+  ```
