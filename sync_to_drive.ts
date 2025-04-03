@@ -56,7 +56,12 @@ async function compute_hash(file_path: string): Promise<string> {
 // List local files recursively with ignore patterns
 async function list_local_files(root_dir: string): Promise<FileInfo[]> {
   const files: FileInfo[] = [];
-  const all_files = await glob("**", { cwd: root_dir, nodir: false, dot: true, ignore: config.ignore });
+  const all_files = await glob("**", {
+    cwd: root_dir,
+    nodir: false,
+    dot: true,
+    ignore: config.ignore.concat([".git/**"]),
+  });
 
   for (const relative_path of all_files) {
     const full_path = path.join(root_dir, relative_path);
@@ -87,12 +92,14 @@ async function list_drive_files(folder_id: string): Promise<Map<string, { id: st
 
 // Ensure folder exists in Drive
 async function ensure_folder(parent_id: string, folder_name: string): Promise<string> {
+  core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   const res = await drive.files.list({
     q: `'${parent_id}' in parents name='${folder_name}' mimeType='application/vnd.google-apps.folder'`,
     fields: "files(id)",
   });
 
   if (res.data.files?.length) {
+    core.info(`Folder '${folder_name}' exists with ID: ${res.data.files[0].id}`);
     return res.data.files[0].id!;
   }
 
@@ -104,6 +111,7 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
     },
     fields: "id",
   });
+  core.info(`Created folder '${folder_name}' with ID: ${folder.data.id}`);
   return folder.data.id!;
 }
 
@@ -197,7 +205,7 @@ async function sync_to_drive() {
         const file_name = path.basename(relative_path);
         const drive_file = drive_files.get(file_name);
 
-        const parts = local_file.relative_path.split(path.sep);  // Fixed: use local_file instead of file
+        const parts = local_file.relative_path.split(path.sep);
         let current_folder_id = folder_id;
         for (let i = 0; i < parts.length - 1; i++) {
           current_folder_id = await ensure_folder(current_folder_id, parts[i]);
