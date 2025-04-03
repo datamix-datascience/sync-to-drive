@@ -1,0 +1,9 @@
+name: "Sync to Google Drive"
+description: "Syncs repo files to Google Drive folders"
+inputs:
+  credentials:
+    description: "Base64-encoded Google Service Account JSON"
+    required: true
+runs:
+  using: "node20"
+  main: "sync_to_drive.js"
