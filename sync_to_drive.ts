@@ -178,9 +178,6 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
   } catch (error: unknown) {
     const err = error as any;
     core.error(`Failed to ensure folder '${folder_name}' under '${parent_id}': ${err.message}`);
-    if (err.response) {
-      core.error(`API response: ${JSON.stringify(err.response.data)}`);
-    }
     throw err;
   }
 }
@@ -218,8 +215,8 @@ async function build_folder_structure(root_folder_id: string, local_files: FileI
   return folder_map;
 }
 
-// Upload or update file
-async function upload_file(file_path: string, folder_id: string, existing_file?: { id: string; name: string }) {
+// Upload or update file with error handling
+async function upload_file(file_path: string, folder_id: string, existing_file?: { id: string; name: string }): Promise<boolean> {
   const file_name = path.basename(file_path);
   const media = { body: fs.createReadStream(file_path) };
 
@@ -242,17 +239,25 @@ async function upload_file(file_path: string, folder_id: string, existing_file?:
       });
       core.info(`Uploaded file '${file_name}' (ID: ${res.data.id})`);
     }
+    return true;
   } catch (error: unknown) {
-    const err = error as Error;
-    core.error(`Failed to process '${file_name}': ${err.message}`);
-    throw err;
+    const err = error as any;
+    core.warning(`Failed to process '${file_name}' in folder ${folder_id}: ${err.message}`);
+    return false;
   }
 }
 
-// Delete untracked file or folder
-async function delete_untracked(id: string, name: string, isFolder: boolean = false) {
-  await drive.files.delete({ fileId: id });
-  core.info(`Deleted untracked ${isFolder ? "folder" : "file"}: ${name}`);
+// Delete untracked file or folder with error handling
+async function delete_untracked(id: string, name: string, isFolder: boolean = false): Promise<boolean> {
+  try {
+    await drive.files.delete({ fileId: id });
+    core.info(`Deleted untracked ${isFolder ? "folder" : "file"}: ${name}`);
+    return true;
+  } catch (error: unknown) {
+    const err = error as any;
+    core.warning(`Failed to delete untracked ${isFolder ? "folder" : "file"} '${name}' (ID: ${id}): ${err.message}`);
+    return false;
+  }
 }
 
 // Main sync function
@@ -267,60 +272,68 @@ async function sync_to_drive() {
   for (const target of config.targets.forks) {
     core.info(`Processing target: ${JSON.stringify(target)}`);
     const folder_id = target.drive_folder_id;
-    const folder_map = await build_folder_structure(folder_id, local_files);
-    const { files: drive_files, folders: drive_folders } = await list_drive_files_recursively(folder_id);
+    let folder_map: Map<string, string>;
+    let drive_files: Map<string, { id: string; hash: string }>;
+    let drive_folders: Map<string, string>;
+
+    try {
+      folder_map = await build_folder_structure(folder_id, local_files);
+      const drive_data = await list_drive_files_recursively(folder_id);
+      drive_files = drive_data.files;
+      drive_folders = drive_data.folders;
+    } catch (error: unknown) {
+      const err = error as any;
+      core.warning(`Failed to initialize sync for folder ${folder_id}: ${err.message}`);
+      continue;  // Skip to next target
+    }
+
     const drive_link = `https://drive.google.com/drive/folders/${folder_id}`;
     core.setOutput("link", drive_link);
 
-    try {
-      core.info(`Folder structure built: ${JSON.stringify([...folder_map])}`);
-      core.info(`Existing Drive files: ${JSON.stringify([...drive_files])}`);
-      core.info(`Existing Drive folders: ${JSON.stringify([...drive_folders])}`);
+    core.info(`Folder structure built: ${JSON.stringify([...folder_map])}`);
+    core.info(`Existing Drive files: ${JSON.stringify([...drive_files])}`);
+    core.info(`Existing Drive folders: ${JSON.stringify([...drive_folders])}`);
 
-      const local_file_map = new Map<string, FileInfo>();
-      for (const file of local_files) {
-        local_file_map.set(file.relative_path, file);
-      }
-
-      for (const [relative_path, local_file] of local_file_map) {
-        const file_name = path.basename(relative_path);
-        const dir_path = path.dirname(relative_path) || "";
-        const target_folder_id = folder_map.get(dir_path) || folder_id;
-        const drive_file = drive_files.get(relative_path);
-
-        if (!drive_file) {
-          await upload_file(local_file.path, target_folder_id);
-        } else if (drive_file.hash !== local_file.hash) {
-          await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
-        }
-        drive_files.delete(relative_path);
-      }
-
-      if (target.on_untrack === "remove") {
-        // Remove untracked files
-        for (const [file_path, file_info] of drive_files) {
-          await delete_untracked(file_info.id, file_path);
-        }
-        // Remove untracked folders
-        for (const [folder_path, folder_id] of drive_folders) {
-          if (!folder_map.has(folder_path)) {
-            await delete_untracked(folder_id, folder_path, true);
-          }
-        }
-      } else if (drive_files.size > 0 || drive_folders.size > folder_map.size) {
-        core.info(`Leaving ${drive_files.size} untracked files and ${drive_folders.size - folder_map.size} untracked folders in folder ${folder_id}`);
-      }
-      core.info(`Sync completed for folder ${folder_id}`);
-    } catch (error: unknown) {
-      const err = error as Error;
-      core.error(`Sync failed for folder ${folder_id}: ${err.message}`);
-      throw err;
+    const local_file_map = new Map<string, FileInfo>();
+    for (const file of local_files) {
+      local_file_map.set(file.relative_path, file);
     }
+
+    for (const [relative_path, local_file] of local_file_map) {
+      const file_name = path.basename(relative_path);
+      const dir_path = path.dirname(relative_path) || "";
+      const target_folder_id = folder_map.get(dir_path) || folder_id;
+      const drive_file = drive_files.get(relative_path);
+
+      if (!drive_file) {
+        await upload_file(local_file.path, target_folder_id);
+      } else if (drive_file.hash !== local_file.hash) {
+        await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
+      }
+      drive_files.delete(relative_path);
+    }
+
+    if (target.on_untrack === "remove") {
+      // Remove untracked files
+      for (const [file_path, file_info] of drive_files) {
+        await delete_untracked(file_info.id, file_path);
+      }
+      // Remove untracked folders
+      for (const [folder_path, folder_id] of drive_folders) {
+        if (!folder_map.has(folder_path)) {
+          await delete_untracked(folder_id, folder_path, true);
+        }
+      }
+    } else if (drive_files.size > 0 || drive_folders.size > folder_map.size) {
+      core.info(`Leaving ${drive_files.size} untracked files and ${drive_folders.size - folder_map.size} untracked folders in folder ${folder_id}`);
+    }
+    core.info(`Sync completed for folder ${folder_id}`);
   }
 }
 
 // Run the action
 sync_to_drive().catch((error: unknown) => {
   const err = error as Error;
-  core.setFailed(`Sync failed: ${err.message}`);
+  core.error(`Unexpected failure in sync_to_drive: ${err.message}`);
+  core.setFailed(`Sync failed unexpectedly: ${err.message}`);
 });
