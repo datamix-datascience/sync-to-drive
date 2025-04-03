@@ -94,16 +94,19 @@ async function list_drive_files(folder_id: string): Promise<Map<string, { id: st
 async function ensure_folder(parent_id: string, folder_name: string): Promise<string> {
   core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   try {
-    const q = `'${parent_id}' in parents '${folder_name}' in name mimeType='application/vnd.google-apps.folder'`;
-    core.info(`Listing folders with query: ${q}`);
+    core.info(`Checking if folder '${folder_name}' exists under '${parent_id}'`);
     const res = await drive.files.list({
-      q,
+      q: `'${parent_id}' in parents ${folder_name}`,
       fields: "files(id)",
+      spaces: "drive",
     });
 
-    if (res.data.files && res.data.files.length > 0) {
-      core.info(`Folder '${folder_name}' exists with ID: ${res.data.files[0].id}`);
-      return res.data.files[0].id!;
+    const folders = res.data.files?.filter(file =>
+      file.mimeType === "application/vnd.google-apps.folder" && file.name === folder_name
+    );
+    if (folders && folders.length > 0) {
+      core.info(`Folder '${folder_name}' exists with ID: ${folders[0].id}`);
+      return folders[0].id!;
     }
 
     core.info(`Folder '${folder_name}' not found, creating it...`);
@@ -118,8 +121,11 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
     core.info(`Created folder '${folder_name}' with ID: ${folder.data.id}`);
     return folder.data.id!;
   } catch (error: unknown) {
-    const err = error as Error;
+    const err = error as any;
     core.error(`Failed to ensure folder '${folder_name}' under '${parent_id}': ${err.message}`);
+    if (err.response) {
+      core.error(`API response: ${JSON.stringify(err.response.data)}`);
+    }
     throw err;
   }
 }
