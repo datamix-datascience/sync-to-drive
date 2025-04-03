@@ -7,7 +7,7 @@ import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { glob } from "glob";
 
-// Config types
+// Config types (unchanged)
 interface SyncConfig {
   source: { repo: string };
   ignore: string[];
@@ -51,7 +51,7 @@ interface DrivePermissionsListResponse {
   nextPageToken?: string;
 }
 
-// Load config from target repo
+// Load config (unchanged)
 let config: SyncConfig;
 try {
   config = JSON.parse(readFileSync("sync.json", "utf-8"));
@@ -60,7 +60,7 @@ try {
   process.exit(1);
 }
 
-// Google Drive API setup
+// Google Drive API setup (unchanged)
 const credentials = core.getInput("credentials", { required: true });
 const credentials_json = JSON.parse(Buffer.from(credentials, "base64").toString());
 const auth = new google.auth.JWT(
@@ -71,13 +71,13 @@ const auth = new google.auth.JWT(
 );
 const drive = google.drive({ version: "v3", auth });
 
-// Compute file hash
+// Compute file hash (unchanged)
 async function compute_hash(file_path: string): Promise<string> {
   const content = await fsPromises.readFile(file_path);
   return createHash("sha1").update(content).digest("hex");
 }
 
-// List local files recursively with ignore patterns
+// List local files (unchanged)
 async function list_local_files(root_dir: string): Promise<FileInfo[]> {
   const files: FileInfo[] = [];
   const all_files = await glob("**", {
@@ -98,7 +98,7 @@ async function list_local_files(root_dir: string): Promise<FileInfo[]> {
   return files;
 }
 
-// Accept pending ownership transfers for the service account
+// Accept ownership transfers (unchanged)
 async function accept_ownership_transfers(folder_id: string) {
   try {
     let permissions: DrivePermission[] = [];
@@ -126,7 +126,7 @@ async function accept_ownership_transfers(folder_id: string) {
         fileId: folder_id,
         permissionId: perm.id,
         requestBody: { role: "owner" },
-        transferOwnership: true,  // Explicitly transfers ownership
+        transferOwnership: true,
       });
       core.info(`Ownership accepted for folder ${folder_id}`);
     }
@@ -136,16 +136,16 @@ async function accept_ownership_transfers(folder_id: string) {
   }
 }
 
-// Recursively list all Drive files and folders under a folder
+// Enhanced list_drive_files_recursively with permissions logging
 async function list_drive_files_recursively(
   folder_id: string,
   base_path: string = ""
 ): Promise<{
-  files: Map<string, { id: string; hash: string; owned: boolean }>;
-  folders: Map<string, { id: string; owned: boolean }>;
+  files: Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>;
+  folders: Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>;
 }> {
-  const file_map = new Map<string, { id: string; hash: string; owned: boolean }>();
-  const folder_map = new Map<string, { id: string; owned: boolean }>();
+  const file_map = new Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>();
+  const folder_map = new Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>();
   let allFiles: DriveFile[] = [];
   let nextPageToken: string | undefined;
 
@@ -168,8 +168,15 @@ async function list_drive_files_recursively(
     const relative_path = base_path ? path.join(base_path, file.name) : file.name;
     const owned = file.owners?.some(owner => owner.emailAddress === serviceAccountEmail) || false;
 
+    // Fetch permissions for this file/folder
+    const permRes = await drive.permissions.list({
+      fileId: file.id,
+      fields: "permissions(id, role, emailAddress, pendingOwner)",
+    }) as { data: DrivePermissionsListResponse };
+    const permissions = permRes.data.permissions || [];
+
     if (file.mimeType === "application/vnd.google-apps.folder") {
-      folder_map.set(relative_path, { id: file.id, owned });
+      folder_map.set(relative_path, { id: file.id, owned, permissions });
       const subfolder_data = await list_drive_files_recursively(file.id, relative_path);
       for (const [sub_path, sub_file] of subfolder_data.files) {
         file_map.set(sub_path, sub_file);
@@ -178,14 +185,14 @@ async function list_drive_files_recursively(
         folder_map.set(sub_path, sub_folder);
       }
     } else {
-      file_map.set(relative_path, { id: file.id, hash: file.md5Checksum || "", owned });
+      file_map.set(relative_path, { id: file.id, hash: file.md5Checksum || "", owned, permissions });
     }
   }
 
   return { files: file_map, folders: folder_map };
 }
 
-// Ensure folder exists in Drive
+// Ensure folder (unchanged)
 async function ensure_folder(parent_id: string, folder_name: string): Promise<string> {
   core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   try {
@@ -235,7 +242,7 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
   }
 }
 
-// Build folder structure once
+// Build folder structure (unchanged)
 async function build_folder_structure(root_folder_id: string, local_files: FileInfo[]): Promise<Map<string, string>> {
   const folder_map = new Map<string, string>();
   folder_map.set("", root_folder_id);
@@ -268,7 +275,7 @@ async function build_folder_structure(root_folder_id: string, local_files: FileI
   return folder_map;
 }
 
-// Upload or update file with error handling
+// Upload or update file (unchanged)
 async function upload_file(file_path: string, folder_id: string, existing_file?: { id: string; name: string }): Promise<boolean> {
   const file_name = path.basename(file_path);
   const media = { body: fs.createReadStream(file_path) };
@@ -300,7 +307,7 @@ async function upload_file(file_path: string, folder_id: string, existing_file?:
   }
 }
 
-// Delete untracked file or folder with error handling
+// Delete untracked file or folder (unchanged)
 async function delete_untracked(id: string, name: string, isFolder: boolean = false): Promise<boolean> {
   try {
     await drive.files.update({
@@ -316,7 +323,7 @@ async function delete_untracked(id: string, name: string, isFolder: boolean = fa
   }
 }
 
-// Main sync function
+// Main sync function with enhanced logging
 async function sync_to_drive() {
   const local_files = await list_local_files(".");
   core.info(`Files to sync: ${JSON.stringify(local_files.map(f => f.relative_path))}`);
@@ -329,12 +336,11 @@ async function sync_to_drive() {
     core.info(`Processing target: ${JSON.stringify(target)}`);
     const folder_id = target.drive_folder_id;
 
-    // Accept any pending ownership transfers for this folder
     await accept_ownership_transfers(folder_id);
 
     let folder_map: Map<string, string>;
-    let drive_files: Map<string, { id: string; hash: string; owned: boolean }>;
-    let drive_folders: Map<string, { id: string; owned: boolean }>;
+    let drive_files: Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>;
+    let drive_folders: Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>;
 
     try {
       folder_map = await build_folder_structure(folder_id, local_files);
@@ -344,7 +350,7 @@ async function sync_to_drive() {
     } catch (error: unknown) {
       const err = error as any;
       core.warning(`Failed to initialize sync for folder ${folder_id}: ${err.message}`);
-      continue;  // Skip to next target
+      continue;
     }
 
     const drive_link = `https://drive.google.com/drive/folders/${folder_id}`;
@@ -375,10 +381,12 @@ async function sync_to_drive() {
 
     if (target.on_untrack === "remove") {
       for (const [file_path, file_info] of drive_files) {
+        core.info(`Attempting to trash file '${file_path}' (ID: ${file_info.id}, Owned: ${file_info.owned}, Permissions: ${JSON.stringify(file_info.permissions)})`);
         await delete_untracked(file_info.id, file_path);
       }
       for (const [folder_path, folder_info] of drive_folders) {
         if (!folder_map.has(folder_path)) {
+          core.info(`Attempting to trash folder '${folder_path}' (ID: ${folder_info.id}, Owned: ${folder_info.owned}, Permissions: ${JSON.stringify(folder_info.permissions)})`);
           await delete_untracked(folder_info.id, folder_path, true);
         }
       }
@@ -389,7 +397,7 @@ async function sync_to_drive() {
   }
 }
 
-// Run the action
+// Run the action (unchanged)
 sync_to_drive().catch((error: unknown) => {
   const err = error as Error;
   core.error(`Unexpected failure in sync_to_drive: ${err.message}`);
