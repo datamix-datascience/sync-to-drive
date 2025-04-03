@@ -46,6 +46,25 @@ else
   echo "No changes to commit."
 fi
 
+# Remove existing tag locally and remotely if it exists
+echo "Checking for existing tag $VERSION..."
+if git rev-parse "$VERSION" >/dev/null 2>&1; then
+  echo "Removing existing local tag $VERSION..."
+  git tag -d "$VERSION"
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to delete local tag $VERSION."
+    exit 1
+  fi
+  echo "Removing existing remote tag $VERSION..."
+  git push origin :refs/tags/"$VERSION"
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to delete remote tag $VERSION."
+    exit 1
+  fi
+else
+  echo "No existing tag $VERSION found."
+fi
+
 # Tag the release
 echo "Tagging release $VERSION..."
 git tag -a "$VERSION" -m "Release $VERSION"
