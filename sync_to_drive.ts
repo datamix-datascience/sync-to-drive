@@ -95,9 +95,11 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
   core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   try {
     core.info(`Checking if folder '${folder_name}' exists under '${parent_id}'`);
+    const q = `'${parent_id}' in parents '${folder_name}'`;  // Quote the folder name
+    core.info(`Query: ${q}`);
     const res = await drive.files.list({
-      q: `'${parent_id}' in parents ${folder_name}`,
-      fields: "files(id)",
+      q,
+      fields: "files(id, name, mimeType)",  // Include name and mimeType for filtering
       spaces: "drive",
     });
 
