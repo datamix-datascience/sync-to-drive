@@ -30,9 +30,9 @@ interface FileInfo {
 // Load config from target repo
 let config: SyncConfig;
 try {
-  config = JSON.parse(readFileSync("sync-config.json", "utf-8"));
+  config = JSON.parse(readFileSync("sync.json", "utf-8"));
 } catch (error) {
-  core.setFailed("Failed to load sync-config.json from target repo");
+  core.setFailed("Failed to load sync.json from target repo");
   process.exit(1);
 }
 

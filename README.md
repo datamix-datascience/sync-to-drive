@@ -4,14 +4,14 @@ A GitHub Action to recursively sync files from a repository to one or more Googl
 
 ## Features
 - **Recursive Sync**: Uploads files and folders while preserving the repository structure.
-- **Multiple Drive Targets**: Syncs to multiple Google Drive folders (forks) defined in `sync-config.json`.
+- **Multiple Drive Targets**: Syncs to multiple Google Drive folders (forks) defined in `sync.json`.
 - **Ignore Patterns**: Excludes files matching glob patterns (e.g., `*.log`, `node_modules/**`).
 - **Conflict Resolution**: Choose to rename conflicting files (e.g., `__my__.<name>`) or override them per target folder.
 - **Untracked File Handling**: Option to ignore or remove files in Drive that aren’t in the repo.
 - **Hash-Based Updates**: Only updates files when their content changes, using SHA1 hashes.
 
-## Configuration (`sync-config.json`)
-Place a `sync-config.json` file in the root of your target repository to define the sync behavior. The file includes the following fields:
+## Configuration (`sync.json`)
+Place a `sync.json` file in the root of your target repository to define the sync behavior. The file includes the following fields:
 
 - `source.repo` (string): The repository URL (e.g., git@github.com:yourusername/resources.git). Used for documentation; not required for the action to function.
 - `ignore` (array of strings): Glob patterns to exclude files/folders from syncing. Examples include `*.log` (ignore log files) and `node_modules/**` (ignore node_modules and its subdirectories).
@@ -68,7 +68,7 @@ Place a `sync-config.json` file in the root of your target repository to define 
      ```
 
 3. **Set Up Your Repository**:
-   - In your target repo (e.g., `resources`), add a `sync-config.json` file with the structure described above.
+   - In your target repo (e.g., `resources`), add a `sync.json` file with the structure described above.
    - Create a workflow file at `.github/workflows/sync_to_drive.yml`:
      ```yaml
      name: sync_to_drive
@@ -112,7 +112,7 @@ resources/
 ├── .github/
 │   └── workflows/
 │       └── sync_to_drive.yml
-├── sync-config.json
+├── sync.json
 ├── bar/
 │   └── foo.txt
 └── baz.txt
