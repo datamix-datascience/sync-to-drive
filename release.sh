@@ -13,8 +13,8 @@ fi
 command -v npm >/dev/null 2>&1 || { echo "Error: npm is required but not installed."; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "Error: git is required but not installed."; exit 1; }
 
-# Build the TypeScript code into dist
-echo "Building sync_to_drive.ts to dist/..."
+# Build the TypeScript code into dist with bundling
+echo "Building sync_to_drive.ts to dist/ with esbuild..."
 npm install
 npm run build
 
