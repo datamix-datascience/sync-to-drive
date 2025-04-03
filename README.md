@@ -10,14 +10,6 @@ A GitHub Action to recursively sync files from a repository to one or more Googl
 - **Untracked File Handling**: Option to ignore or remove files in Drive that aren’t in the repo.
 - **Hash-Based Updates**: Only updates files when their content changes, using SHA1 hashes.
 
-## Prerequesites
-- Google Service Account (GSA) via https://console.cloud.google.com/apis/credentials
-- Share Drive folder with the GSA aka `client_email` value from GSA.
-- Store credentials as GitHub secrets as base64
-  ```
-  base64 CREDENTIALS_FILENAME.json | pbcopy
-  ```
-
 ## Configuration (`sync-config.json`)
 Place a `sync-config.json` file in the root of your target repository to define the sync behavior. The file includes the following fields:
 
@@ -72,9 +64,8 @@ Place a `sync-config.json` file in the root of your target repository to define 
 2. **Encode Credentials**:
    - Convert the JSON key to base64:
      ```bash
-     base64 credentials.json > creds.txt
+     base64 -i credentials.json | pbcopy
      ```
-   - Copy the contents of `creds.txt`.
 
 3. **Set Up Your Repository**:
    - In your target repo (e.g., `resources`), add a `sync-config.json` file with the structure described above.
@@ -145,4 +136,4 @@ To modify the action:
 2. Install dependencies: `npm install`.
 3. Edit `sync_to_drive.ts`.
 4. Build: `npm run build`.
-5. Push changes and tag a new release (e.g., `v2`).
+5. Push changes and tag a new release: `./release.sh v2` for `v2`
