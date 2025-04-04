@@ -222,8 +222,9 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
     let next_page_token: string | undefined;
 
     do {
+      core.debug(`Querying Drive with q: '${parent_id}' in parents "${folder_name}"`);
       const res = await drive.files.list({
-        q: `'${parent_id}' in parents ${folder_name}`,
+        q: `'${parent_id}' in parents "${folder_name}"`,
         fields: "nextPageToken, files(id, name, mime_type)",
         spaces: "drive",
         pageToken: next_page_token,
@@ -233,6 +234,8 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
       all_files = all_files.concat(res.data.files || []);
       next_page_token = res.data.next_page_token;
     } while (next_page_token);
+
+    core.debug(`Found items under '${parent_id}' for '${folder_name}': ${JSON.stringify(all_files)}`);
 
     const existing_folder = all_files.find(file =>
       file.mime_type === "application/vnd.google-apps.folder" &&
