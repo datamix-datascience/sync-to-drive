@@ -31,7 +31,7 @@ interface DriveFile {
   name?: string;
   mimeType?: string;
   md5Checksum?: string;
-  owners?: { emailAddress: string }[]; // API field, use camelCase
+  owners?: { emailAddress: string }[];
 }
 
 interface DriveFilesListResponse {
@@ -42,8 +42,8 @@ interface DriveFilesListResponse {
 interface DrivePermission {
   id: string;
   role: string;
-  pendingOwner?: boolean; // API field, use camelCase
-  emailAddress?: string; // API field, use camelCase
+  pendingOwner?: boolean;
+  emailAddress?: string;
 }
 
 interface DrivePermissionsListResponse {
@@ -58,6 +58,13 @@ interface UntrackedItem {
   name: string;
   owner_email: string;
   ownership_transfer_requested: boolean;
+}
+
+interface DriveItem {
+  id: string;
+  hash?: string; // Optional for folders
+  owned: boolean;
+  permissions: DrivePermission[];
 }
 
 // Load config
@@ -164,11 +171,11 @@ async function list_drive_files_recursively(
   folder_id: string,
   base_path: string = ""
 ): Promise<{
-  files: Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>;
-  folders: Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>;
+  files: Map<string, DriveItem>;
+  folders: Map<string, DriveItem>;
 }> {
-  const file_map = new Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>();
-  const folder_map = new Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>();
+  const file_map = new Map<string, DriveItem>();
+  const folder_map = new Map<string, DriveItem>();
   let all_files: DriveFile[] = [];
   let next_page_token: string | undefined;
 
@@ -267,7 +274,7 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
 async function build_folder_structure(
   root_folder_id: string,
   local_files: FileInfo[],
-  existing_folders: Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>
+  existing_folders: Map<string, DriveItem>
 ): Promise<Map<string, string>> {
   const folder_map = new Map<string, string>();
   folder_map.set("", root_folder_id);
@@ -380,7 +387,7 @@ async function request_ownership_transfer(file_id: string, current_owner_email: 
 
 // List untracked files (only files, not folders)
 async function list_untracked_files(
-  drive_files: Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>
+  drive_files: Map<string, DriveItem>
 ): Promise<UntrackedItem[]> {
   const untracked_items: UntrackedItem[] = [];
 
@@ -423,8 +430,8 @@ async function sync_to_drive() {
     await accept_ownership_transfers(folder_id);
 
     let folder_map: Map<string, string>;
-    let drive_files: Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>;
-    let drive_folders: Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>;
+    let drive_files: Map<string, DriveItem>;
+    let drive_folders: Map<string, DriveItem>;
 
     try {
       const drive_data = await list_drive_files_recursively(folder_id);
