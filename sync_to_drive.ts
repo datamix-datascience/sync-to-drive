@@ -400,7 +400,7 @@ async function list_untracked_files(
       url: `https://drive.google.com/file/d/${file_info.id}`,
       name: path.basename(file_path),
       owner_email,
-      ownership_transfer_requested: ownership_transfer_requested_ids.has(file_id),
+      ownership_transfer_requested: ownership_transfer_requested_ids.has(file_info.id), // Fixed typo
     });
   }
 
