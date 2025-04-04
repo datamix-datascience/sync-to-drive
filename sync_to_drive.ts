@@ -29,26 +29,26 @@ interface FileInfo {
 interface DriveFile {
   id?: string;
   name?: string;
-  mimeType?: string; // API field, use camelCase
-  md5Checksum?: string; // API field, use camelCase
-  owners?: { email_address: string }[];
+  mimeType?: string;
+  md5Checksum?: string;
+  owners?: { emailAddress: string }[]; // API field, use camelCase
 }
 
 interface DriveFilesListResponse {
   files?: DriveFile[];
-  nextPageToken?: string; // API field, use camelCase
+  nextPageToken?: string;
 }
 
 interface DrivePermission {
   id: string;
   role: string;
-  pending_owner?: boolean;
-  email_address?: string;
+  pendingOwner?: boolean; // API field, use camelCase
+  emailAddress?: string; // API field, use camelCase
 }
 
 interface DrivePermissionsListResponse {
   permissions?: DrivePermission[];
-  nextPageToken?: string; // API field, use camelCase
+  nextPageToken?: string;
 }
 
 interface UntrackedItem {
@@ -129,7 +129,7 @@ async function accept_ownership_transfers(file_id: string) {
 
     const service_account_email = credentials_json.client_email;
     const pending_permissions = permissions.filter(
-      p => p.email_address === service_account_email && p.pending_owner
+      p => p.emailAddress === service_account_email && p.pendingOwner
     );
 
     for (const perm of pending_permissions) {
@@ -175,7 +175,7 @@ async function list_drive_files_recursively(
   do {
     const res = await drive.files.list({
       q: `'${folder_id}' in parents`,
-      fields: "nextPageToken, files(id, name, mimeType, md5Checksum, owners(email_address))",
+      fields: "nextPageToken, files(id, name, mimeType, md5Checksum, owners(emailAddress))",
       spaces: "drive",
       pageToken: next_page_token,
       pageSize: 1000,
@@ -189,11 +189,11 @@ async function list_drive_files_recursively(
   for (const file of all_files) {
     if (!file.name || !file.id) continue;
     const relative_path = base_path ? path.join(base_path, file.name) : file.name;
-    const owned = file.owners?.some(owner => owner.email_address === service_account_email) || false;
+    const owned = file.owners?.some(owner => owner.emailAddress === service_account_email) || false;
 
     const perm_res = await drive.permissions.list({
       fileId: file.id,
-      fields: "permissions(id, role, email_address, pending_owner)",
+      fields: "permissions(id, role, emailAddress, pendingOwner)",
     }) as { data: DrivePermissionsListResponse };
     const permissions = perm_res.data.permissions || [];
 
@@ -393,14 +393,14 @@ async function list_untracked_files(
     }
 
     const owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner");
-    const owner_email = owner?.email_address || "unknown";
+    const owner_email = owner?.emailAddress || "unknown";
     untracked_items.push({
       id: file_info.id,
       path: file_path,
       url: `https://drive.google.com/file/d/${file_info.id}`,
       name: path.basename(file_path),
       owner_email,
-      ownership_transfer_requested: ownership_transfer_requested_ids.has(file_info.id), // Fixed typo
+      ownership_transfer_requested: ownership_transfer_requested_ids.has(file_info.id),
     });
   }
 
@@ -475,7 +475,7 @@ async function sync_to_drive() {
 
         core.info(`Attempting to trash file '${file_path}' (ID: ${file_info.id}, Owned: ${file_info.owned})`);
         if (!file_info.owned) {
-          const current_owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner")?.email_address;
+          const current_owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
           if (current_owner && current_owner !== credentials_json.client_email) {
             await request_ownership_transfer(file_info.id, current_owner);
             continue;
@@ -492,7 +492,7 @@ async function sync_to_drive() {
           if (!has_tracked_files) {
             core.info(`Attempting to trash folder '${folder_path}' (ID: ${folder_info.id}, Owned: ${folder_info.owned})`);
             if (!folder_info.owned) {
-              const current_owner = folder_info.permissions.find((p: DrivePermission) => p.role === "owner")?.email_address;
+              const current_owner = folder_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
               if (current_owner && current_owner !== credentials_json.client_email) {
                 await request_ownership_transfer(folder_info.id, current_owner);
                 continue;
