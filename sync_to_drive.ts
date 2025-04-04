@@ -17,7 +17,7 @@ interface SyncConfig {
 interface DriveTarget {
   drive_folder_id: string;
   drive_url: string;
-  on_untrack: "ignore" | "remove";
+  on_untrack: "ignore" | "remove" | "request";
 }
 
 interface FileInfo {
@@ -62,7 +62,7 @@ interface UntrackedItem {
 
 interface DriveItem {
   id: string;
-  hash?: string; // Optional for folders
+  hash?: string;
   owned: boolean;
   permissions: DrivePermission[];
 }
@@ -488,7 +488,9 @@ async function sync_to_drive() {
             continue;
           }
         }
-        await delete_untracked(file_info.id, file_path);
+        if (await delete_untracked(file_info.id, file_path)) {
+          drive_files.delete(file_path);
+        }
       }
 
       for (const [folder_path, folder_info] of drive_folders) {
@@ -505,7 +507,39 @@ async function sync_to_drive() {
                 continue;
               }
             }
-            await delete_untracked(folder_info.id, folder_path, true);
+            if (await delete_untracked(folder_info.id, folder_path, true)) {
+              drive_folders.delete(folder_path);
+            }
+          }
+        }
+      }
+    } else if (target.on_untrack === "request") {
+      for (const [file_path, file_info] of drive_files) {
+        const is_ignored = config.ignore.some(pattern =>
+          new RegExp(pattern.replace(/\*/g, ".*")).test(file_path)
+        );
+        if (is_ignored) {
+          continue;
+        }
+
+        if (!file_info.owned) {
+          const current_owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
+          if (current_owner && current_owner !== credentials_json.client_email && !ownership_transfer_requested_ids.has(file_info.id)) {
+            await request_ownership_transfer(file_info.id, current_owner);
+          }
+        }
+      }
+
+      for (const [folder_path, folder_info] of drive_folders) {
+        if (!folder_map.has(folder_path)) {
+          const has_tracked_files = Array.from(drive_files.keys()).some(file_path =>
+            file_path.startsWith(folder_path + "/")
+          );
+          if (!has_tracked_files && !folder_info.owned) {
+            const current_owner = folder_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
+            if (current_owner && current_owner !== credentials_json.client_email && !ownership_transfer_requested_ids.has(folder_info.id)) {
+              await request_ownership_transfer(folder_info.id, current_owner);
+            }
           }
         }
       }
