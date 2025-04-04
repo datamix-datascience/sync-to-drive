@@ -222,20 +222,19 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
     let next_page_token: string | undefined;
 
     do {
-      core.debug(`Querying Drive with q: '${parent_id}' in parents "${folder_name}"`);
+      core.info(`Listing files under '${parent_id}' with query: '${parent_id}' in parents`);
       const res = await drive.files.list({
-        q: `'${parent_id}' in parents "${folder_name}"`,
+        q: `'${parent_id}' in parents`,
         fields: "nextPageToken, files(id, name, mime_type)",
         spaces: "drive",
         pageToken: next_page_token,
         pageSize: 1000,
       }) as { data: DriveFilesListResponse };
 
+      core.info(`API response for '${parent_id}': ${JSON.stringify(res.data)}`);
       all_files = all_files.concat(res.data.files || []);
       next_page_token = res.data.next_page_token;
     } while (next_page_token);
-
-    core.debug(`Found items under '${parent_id}' for '${folder_name}': ${JSON.stringify(all_files)}`);
 
     const existing_folder = all_files.find(file =>
       file.mime_type === "application/vnd.google-apps.folder" &&
@@ -383,7 +382,7 @@ async function list_untracked_files(
       continue;
     }
 
-    const owner = file_info.permissions.find(p => p.role === "owner");
+    const owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner");
     const owner_email = owner?.email_address || "unknown";
     untracked_items.push({
       id: file_info.id,
@@ -466,7 +465,7 @@ async function sync_to_drive() {
 
         core.info(`Attempting to trash file '${file_path}' (ID: ${file_info.id}, Owned: ${file_info.owned})`);
         if (!file_info.owned) {
-          const current_owner = file_info.permissions.find(p => p.role === "owner")?.email_address;
+          const current_owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner")?.email_address;
           if (current_owner && current_owner !== credentials_json.client_email) {
             await request_ownership_transfer(file_info.id, current_owner);
             continue;
@@ -483,7 +482,7 @@ async function sync_to_drive() {
           if (!has_tracked_files) {
             core.info(`Attempting to trash folder '${folder_path}' (ID: ${folder_info.id}, Owned: ${folder_info.owned})`);
             if (!folder_info.owned) {
-              const current_owner = folder_info.permissions.find(p => p.role === "owner")?.email_address;
+              const current_owner = folder_info.permissions.find((p: DrivePermission) => p.role === "owner")?.email_address;
               if (current_owner && current_owner !== credentials_json.client_email) {
                 await request_ownership_transfer(folder_info.id, current_owner);
                 continue;
