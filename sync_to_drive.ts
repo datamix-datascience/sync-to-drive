@@ -57,6 +57,7 @@ interface UntrackedItem {
   url: string;
   name: string;
   owner_email: string;
+  ownership_transfer_requested: boolean;
 }
 
 // Load config
@@ -78,6 +79,9 @@ const auth = new google.auth.JWT(
   ["https://www.googleapis.com/auth/drive"]
 );
 const drive = google.drive({ version: "v3", auth });
+
+// Track ownership transfer requests
+const ownership_transfer_requested_ids = new Set<string>();
 
 // Compute file hash
 async function compute_hash(file_path: string): Promise<string> {
@@ -137,6 +141,7 @@ async function accept_ownership_transfers(file_id: string) {
         transferOwnership: true,
       });
       core.info(`Ownership accepted for item ${file_id}`);
+      ownership_transfer_requested_ids.delete(file_id); // Clear if accepted
     }
 
     const children = await drive.files.list({
@@ -357,6 +362,7 @@ async function request_ownership_transfer(file_id: string, current_owner_email: 
       emailMessage: `Please approve ownership transfer of item ${file_id} to ${service_account_email} for sync cleanup`,
     });
     core.info(`Ownership transfer requested for item ${file_id} - awaiting approval from ${current_owner_email}`);
+    ownership_transfer_requested_ids.add(file_id); // Track the request
   } catch (error: unknown) {
     const err = error as any;
     core.warning(`Failed to request ownership transfer for item ${file_id}: ${err.message}`);
@@ -385,6 +391,7 @@ async function list_untracked_files(
       url: `https://drive.google.com/file/d/${file_info.id}`,
       name: path.basename(file_path),
       owner_email,
+      ownership_transfer_requested: ownership_transfer_requested_ids.has(file_info.id),
     });
   }
 
