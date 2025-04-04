@@ -141,3 +141,6 @@ To modify the action:
   chmod +x release.sh
   ./release.sh v2
   ```
+
+## TODO
+- Add code to open a github issue with title `[UNTRACKED] ${owner_email.split("@")[0]}'s files` and body with checkbox item contain file detail with clickable [file_path/file_name](file_url) so we can tick update and close the issue later when it get tracked.
