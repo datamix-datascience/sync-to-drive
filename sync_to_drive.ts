@@ -7,7 +7,7 @@ import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { glob } from "glob";
 
-// Config types (unchanged)
+// Config types
 interface SyncConfig {
   source: { repo: string };
   ignore: string[];
@@ -51,7 +51,15 @@ interface DrivePermissionsListResponse {
   nextPageToken?: string;
 }
 
-// Load config (unchanged)
+interface UntrackedItem {
+  id: string;
+  path: string;
+  url: string;
+  name: string;
+  owner_email: string;
+}
+
+// Load config
 let config: SyncConfig;
 try {
   config = JSON.parse(readFileSync("sync.json", "utf-8"));
@@ -60,7 +68,7 @@ try {
   process.exit(1);
 }
 
-// Google Drive API setup (unchanged)
+// Google Drive API setup
 const credentials = core.getInput("credentials", { required: true });
 const credentials_json = JSON.parse(Buffer.from(credentials, "base64").toString());
 const auth = new google.auth.JWT(
@@ -71,13 +79,13 @@ const auth = new google.auth.JWT(
 );
 const drive = google.drive({ version: "v3", auth });
 
-// Compute file hash (unchanged)
+// Compute file hash
 async function compute_hash(file_path: string): Promise<string> {
   const content = await fsPromises.readFile(file_path);
   return createHash("sha1").update(content).digest("hex");
 }
 
-// List local files (unchanged)
+// List local files
 async function list_local_files(root_dir: string): Promise<FileInfo[]> {
   const files: FileInfo[] = [];
   const all_files = await glob("**", {
@@ -102,25 +110,25 @@ async function list_local_files(root_dir: string): Promise<FileInfo[]> {
 async function accept_ownership_transfers(file_id: string) {
   try {
     let permissions: DrivePermission[] = [];
-    let nextPageToken: string | undefined;
+    let next_page_token: string | undefined;
 
     do {
       const res = await drive.permissions.list({
         fileId: file_id,
         fields: "nextPageToken, permissions(id, role, emailAddress, pendingOwner)",
-        pageToken: nextPageToken,
+        pageToken: next_page_token,
       }) as { data: DrivePermissionsListResponse };
 
       permissions = permissions.concat(res.data.permissions || []);
-      nextPageToken = res.data.nextPageToken;
-    } while (nextPageToken);
+      next_page_token = res.data.nextPageToken;
+    } while (next_page_token);
 
-    const serviceAccountEmail = credentials_json.client_email;
-    const pendingPermissions = permissions.filter(
-      p => p.emailAddress === serviceAccountEmail && p.pendingOwner
+    const service_account_email = credentials_json.client_email;
+    const pending_permissions = permissions.filter(
+      p => p.emailAddress === service_account_email && p.pendingOwner
     );
 
-    for (const perm of pendingPermissions) {
+    for (const perm of pending_permissions) {
       core.info(`Accepting ownership transfer for item ${file_id}, permission ID: ${perm.id}`);
       await drive.permissions.update({
         fileId: file_id,
@@ -131,7 +139,6 @@ async function accept_ownership_transfers(file_id: string) {
       core.info(`Ownership accepted for item ${file_id}`);
     }
 
-    // Recursively check children
     const children = await drive.files.list({
       q: `'${file_id}' in parents`,
       fields: "files(id, mimeType)",
@@ -147,7 +154,7 @@ async function accept_ownership_transfers(file_id: string) {
   }
 }
 
-// List Drive files recursively (unchanged except type)
+// List Drive files recursively
 async function list_drive_files_recursively(
   folder_id: string,
   base_path: string = ""
@@ -157,33 +164,33 @@ async function list_drive_files_recursively(
 }> {
   const file_map = new Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>();
   const folder_map = new Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>();
-  let allFiles: DriveFile[] = [];
-  let nextPageToken: string | undefined;
+  let all_files: DriveFile[] = [];
+  let next_page_token: string | undefined;
 
   do {
     const res = await drive.files.list({
       q: `'${folder_id}' in parents`,
       fields: "nextPageToken, files(id, name, mimeType, md5Checksum, owners(emailAddress))",
       spaces: "drive",
-      pageToken: nextPageToken,
+      pageToken: next_page_token,
       pageSize: 1000,
     }) as { data: DriveFilesListResponse };
 
-    allFiles = allFiles.concat(res.data.files || []);
-    nextPageToken = res.data.nextPageToken;
-  } while (nextPageToken);
+    all_files = all_files.concat(res.data.files || []);
+    next_page_token = res.data.nextPageToken;
+  } while (next_page_token);
 
-  const serviceAccountEmail = credentials_json.client_email;
-  for (const file of allFiles) {
+  const service_account_email = credentials_json.client_email;
+  for (const file of all_files) {
     if (!file.name || !file.id) continue;
     const relative_path = base_path ? path.join(base_path, file.name) : file.name;
-    const owned = file.owners?.some(owner => owner.emailAddress === serviceAccountEmail) || false;
+    const owned = file.owners?.some(owner => owner.emailAddress === service_account_email) || false;
 
-    const permRes = await drive.permissions.list({
+    const perm_res = await drive.permissions.list({
       fileId: file.id,
       fields: "permissions(id, role, emailAddress, pendingOwner)",
     }) as { data: DrivePermissionsListResponse };
-    const permissions = permRes.data.permissions || [];
+    const permissions = perm_res.data.permissions || [];
 
     if (file.mimeType === "application/vnd.google-apps.folder") {
       folder_map.set(relative_path, { id: file.id, owned, permissions });
@@ -202,36 +209,36 @@ async function list_drive_files_recursively(
   return { files: file_map, folders: folder_map };
 }
 
-// Ensure folder (unchanged)
+// Ensure folder
 async function ensure_folder(parent_id: string, folder_name: string): Promise<string> {
   core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
   try {
-    let allFiles: DriveFile[] = [];
-    let nextPageToken: string | undefined;
+    let all_files: DriveFile[] = [];
+    let next_page_token: string | undefined;
 
     do {
-      core.info(`Listing files under '${parent_id}' (pageToken: ${nextPageToken || 'none'})`);
+      core.info(`Listing files under '${parent_id}' (pageToken: ${next_page_token || 'none'})`);
       const res = await drive.files.list({
         q: `'${parent_id}' in parents`,
         fields: "nextPageToken, files(id, name, mimeType)",
         spaces: "drive",
-        pageToken: nextPageToken,
+        pageToken: next_page_token,
         pageSize: 1000,
       }) as { data: DriveFilesListResponse };
 
-      allFiles = allFiles.concat(res.data.files || []);
-      nextPageToken = res.data.nextPageToken;
-    } while (nextPageToken);
+      all_files = all_files.concat(res.data.files || []);
+      next_page_token = res.data.nextPageToken;
+    } while (next_page_token);
 
-    core.info(`Total files found under '${parent_id}': ${JSON.stringify(allFiles)}`);
+    core.info(`Total files found under '${parent_id}': ${JSON.stringify(all_files)}`);
 
-    const existingFolder = allFiles.find(file =>
+    const existing_folder = all_files.find(file =>
       file.mimeType === "application/vnd.google-apps.folder" &&
       file.name?.toLowerCase() === folder_name.toLowerCase()
     );
-    if (existingFolder && existingFolder.id) {
-      core.info(`Folder '${folder_name}' already exists with ID: ${existingFolder.id}`);
-      return existingFolder.id;
+    if (existing_folder && existing_folder.id) {
+      core.info(`Folder '${folder_name}' already exists with ID: ${existing_folder.id}`);
+      return existing_folder.id;
     }
 
     core.info(`Folder '${folder_name}' not found, creating it...`);
@@ -252,7 +259,7 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
   }
 }
 
-// Build folder structure (unchanged)
+// Build folder structure
 async function build_folder_structure(root_folder_id: string, local_files: FileInfo[]): Promise<Map<string, string>> {
   const folder_map = new Map<string, string>();
   folder_map.set("", root_folder_id);
@@ -285,7 +292,7 @@ async function build_folder_structure(root_folder_id: string, local_files: FileI
   return folder_map;
 }
 
-// Upload or update file (unchanged)
+// Upload or update file
 async function upload_file(file_path: string, folder_id: string, existing_file?: { id: string; name: string }): Promise<boolean> {
   const file_name = path.basename(file_path);
   const media = { body: fs.createReadStream(file_path) };
@@ -317,20 +324,72 @@ async function upload_file(file_path: string, folder_id: string, existing_file?:
   }
 }
 
-// Delete untracked file or folder (unchanged)
-async function delete_untracked(id: string, name: string, isFolder: boolean = false): Promise<boolean> {
+// Delete untracked file or folder
+async function delete_untracked(id: string, name: string, is_folder: boolean = false): Promise<boolean> {
   try {
     await drive.files.update({
       fileId: id,
       requestBody: { trashed: true },
     });
-    core.info(`Moved untracked ${isFolder ? "folder" : "file"} to Trash: ${name}`);
+    core.info(`Moved untracked ${is_folder ? "folder" : "file"} to Trash: ${name}`);
     return true;
   } catch (error: unknown) {
     const err = error as any;
-    core.warning(`Failed to trash untracked ${isFolder ? "folder" : "file"} '${name}' (ID: ${id}): ${err.message}`);
+    core.warning(`Failed to trash untracked ${is_folder ? "folder" : "file"} '${name}' (ID: ${id}): ${err.message}`);
     return false;
   }
+}
+
+// Request ownership transfer
+async function request_ownership_transfer(file_id: string, current_owner_email: string) {
+  try {
+    const service_account_email = credentials_json.client_email;
+    core.info(`Requesting ownership transfer of item ${file_id} from ${current_owner_email} to ${service_account_email}`);
+    await drive.permissions.create({
+      fileId: file_id,
+      requestBody: {
+        role: "owner",
+        type: "user",
+        emailAddress: service_account_email,
+      },
+      transferOwnership: true,
+      sendNotificationEmail: true,
+      emailMessage: `Please approve ownership transfer of item ${file_id} to ${service_account_email} for sync cleanup`,
+    });
+    core.info(`Ownership transfer requested for item ${file_id} - awaiting approval from ${current_owner_email}`);
+  } catch (error: unknown) {
+    const err = error as any;
+    core.warning(`Failed to request ownership transfer for item ${file_id}: ${err.message}`);
+  }
+}
+
+// List untracked files (ignoring empty folders and config.ignore)
+async function list_untracked_files(
+  drive_files: Map<string, { id: string; hash: string; owned: boolean; permissions: DrivePermission[] }>
+): Promise<UntrackedItem[]> {
+  const untracked_items: UntrackedItem[] = [];
+
+  for (const [file_path, file_info] of drive_files) {
+    // Check if the file matches any ignore pattern
+    const is_ignored = config.ignore.some(pattern =>
+      new RegExp(pattern.replace(/\*/g, ".*")).test(file_path)
+    );
+    if (is_ignored) {
+      continue; // Skip ignored files
+    }
+
+    const owner = file_info.permissions.find(p => p.role === "owner");
+    const owner_email = owner?.emailAddress || "unknown";
+    untracked_items.push({
+      id: file_info.id,
+      path: file_path,
+      url: `https://drive.google.com/file/d/${file_info.id}`,
+      name: path.basename(file_path),
+      owner_email,
+    });
+  }
+
+  return untracked_items;
 }
 
 // Main sync function
@@ -346,7 +405,6 @@ async function sync_to_drive() {
     core.info(`Processing target: ${JSON.stringify(target)}`);
     const folder_id = target.drive_folder_id;
 
-    // Accept ownership transfers for the root folder and all subitems
     await accept_ownership_transfers(folder_id);
 
     let folder_map: Map<string, string>;
@@ -390,33 +448,53 @@ async function sync_to_drive() {
       drive_files.delete(relative_path);
     }
 
+    let untracked_files_list: UntrackedItem[] = [];
     if (target.on_untrack === "remove") {
       for (const [file_path, file_info] of drive_files) {
+        const is_ignored = config.ignore.some(pattern =>
+          new RegExp(pattern.replace(/\*/g, ".*")).test(file_path)
+        );
+        if (is_ignored) {
+          continue; // Skip ignored files during removal
+        }
+
         core.info(`Attempting to trash file '${file_path}' (ID: ${file_info.id}, Owned: ${file_info.owned}, Permissions: ${JSON.stringify(file_info.permissions)})`);
-        // Ensure ownership before trashing
         if (!file_info.owned) {
-          core.info(`Requesting ownership transfer for '${file_path}' (ID: ${file_info.id}) - manual action required by current owner`);
+          const current_owner = file_info.permissions.find(p => p.role === "owner")?.emailAddress;
+          if (current_owner && current_owner !== credentials_json.client_email) {
+            await request_ownership_transfer(file_info.id, current_owner);
+            continue; // Skip trashing until ownership is transferred
+          }
         }
         await delete_untracked(file_info.id, file_path);
       }
       for (const [folder_path, folder_info] of drive_folders) {
         if (!folder_map.has(folder_path)) {
           core.info(`Attempting to trash folder '${folder_path}' (ID: ${folder_info.id}, Owned: ${folder_info.owned}, Permissions: ${JSON.stringify(folder_info.permissions)})`);
-          // Ensure ownership before trashing
           if (!folder_info.owned) {
-            core.info(`Requesting ownership transfer for '${folder_path}' (ID: ${folder_info.id}) - manual action required by current owner`);
+            const current_owner = folder_info.permissions.find(p => p.role === "owner")?.emailAddress;
+            if (current_owner && current_owner !== credentials_json.client_email) {
+              await request_ownership_transfer(folder_info.id, current_owner);
+              continue; // Skip trashing until ownership is transferred
+            }
           }
           await delete_untracked(folder_info.id, folder_path, true);
         }
       }
-    } else if (drive_files.size > 0 || drive_folders.size > folder_map.size) {
-      core.info(`Leaving ${drive_files.size} untracked files and ${drive_folders.size - folder_map.size} untracked folders in folder ${folder_id}`);
     }
+
+    untracked_files_list = await list_untracked_files(drive_files);
+    if (untracked_files_list.length > 0) {
+      core.warning(`Untracked files remaining in folder ${folder_id}:\n${JSON.stringify(untracked_files_list, null, 2)}`);
+    } else {
+      core.info(`No untracked files remaining in folder ${folder_id}`);
+    }
+
     core.info(`Sync completed for folder ${folder_id}`);
   }
 }
 
-// Run the action (unchanged)
+// Run the action
 sync_to_drive().catch((error: unknown) => {
   const err = error as Error;
   core.error(`Unexpected failure in sync_to_drive: ${err.message}`);
