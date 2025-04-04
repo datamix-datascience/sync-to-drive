@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import { google } from "googleapis";
-import * as fsPromises from "fs/promises";
+import * as fs_promises from "fs/promises";
 import * as fs from "fs";
 import * as path from "path";
 import { createHash } from "crypto";
@@ -29,14 +29,14 @@ interface FileInfo {
 interface DriveFile {
   id?: string;
   name?: string;
-  mime_type?: string;
-  md5_checksum?: string;
+  mimeType?: string; // API field, use camelCase
+  md5Checksum?: string; // API field, use camelCase
   owners?: { email_address: string }[];
 }
 
 interface DriveFilesListResponse {
   files?: DriveFile[];
-  next_page_token?: string;
+  nextPageToken?: string; // API field, use camelCase
 }
 
 interface DrivePermission {
@@ -48,7 +48,7 @@ interface DrivePermission {
 
 interface DrivePermissionsListResponse {
   permissions?: DrivePermission[];
-  next_page_token?: string;
+  nextPageToken?: string; // API field, use camelCase
 }
 
 interface UntrackedItem {
@@ -85,7 +85,7 @@ const ownership_transfer_requested_ids = new Set<string>();
 
 // Compute file hash
 async function compute_hash(file_path: string): Promise<string> {
-  const content = await fsPromises.readFile(file_path);
+  const content = await fs_promises.readFile(file_path);
   return createHash("sha1").update(content).digest("hex");
 }
 
@@ -101,7 +101,7 @@ async function list_local_files(root_dir: string): Promise<FileInfo[]> {
 
   for (const relative_path of all_files) {
     const full_path = path.join(root_dir, relative_path);
-    const stats = await fsPromises.stat(full_path);
+    const stats = await fs_promises.stat(full_path);
     if (stats.isFile()) {
       const hash = await compute_hash(full_path);
       files.push({ path: full_path, hash, relative_path });
@@ -124,7 +124,7 @@ async function accept_ownership_transfers(file_id: string) {
       }) as { data: DrivePermissionsListResponse };
 
       permissions = permissions.concat(res.data.permissions || []);
-      next_page_token = res.data.next_page_token;
+      next_page_token = res.data.nextPageToken;
     } while (next_page_token);
 
     const service_account_email = credentials_json.client_email;
@@ -146,7 +146,7 @@ async function accept_ownership_transfers(file_id: string) {
 
     const children = await drive.files.list({
       q: `'${file_id}' in parents`,
-      fields: "files(id, mime_type)",
+      fields: "files(id, mimeType)",
     });
     for (const child of children.data.files || []) {
       if (child.id) {
@@ -175,14 +175,14 @@ async function list_drive_files_recursively(
   do {
     const res = await drive.files.list({
       q: `'${folder_id}' in parents`,
-      fields: "nextPageToken, files(id, name, mime_type, md5_checksum, owners(email_address))",
+      fields: "nextPageToken, files(id, name, mimeType, md5Checksum, owners(email_address))",
       spaces: "drive",
       pageToken: next_page_token,
       pageSize: 1000,
     }) as { data: DriveFilesListResponse };
 
     all_files = all_files.concat(res.data.files || []);
-    next_page_token = res.data.next_page_token;
+    next_page_token = res.data.nextPageToken;
   } while (next_page_token);
 
   const service_account_email = credentials_json.client_email;
@@ -197,7 +197,7 @@ async function list_drive_files_recursively(
     }) as { data: DrivePermissionsListResponse };
     const permissions = perm_res.data.permissions || [];
 
-    if (file.mime_type === "application/vnd.google-apps.folder") {
+    if (file.mimeType === "application/vnd.google-apps.folder") {
       folder_map.set(relative_path, { id: file.id, owned, permissions });
       const subfolder_data = await list_drive_files_recursively(file.id, relative_path);
       for (const [sub_path, sub_file] of subfolder_data.files) {
@@ -207,7 +207,7 @@ async function list_drive_files_recursively(
         folder_map.set(sub_path, sub_folder);
       }
     } else {
-      file_map.set(relative_path, { id: file.id, hash: file.md5_checksum || "", owned, permissions });
+      file_map.set(relative_path, { id: file.id, hash: file.md5Checksum || "", owned, permissions });
     }
   }
 
@@ -225,7 +225,7 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
       core.info(`Listing files under '${parent_id}' with query: '${parent_id}' in parents`);
       const res = await drive.files.list({
         q: `'${parent_id}' in parents`,
-        fields: "nextPageToken, files(id, name, mime_type)",
+        fields: "nextPageToken, files(id, name, mimeType)",
         spaces: "drive",
         pageToken: next_page_token,
         pageSize: 1000,
@@ -233,11 +233,11 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
 
       core.info(`API response for '${parent_id}': ${JSON.stringify(res.data)}`);
       all_files = all_files.concat(res.data.files || []);
-      next_page_token = res.data.next_page_token;
+      next_page_token = res.data.nextPageToken;
     } while (next_page_token);
 
     const existing_folder = all_files.find(file =>
-      file.mime_type === "application/vnd.google-apps.folder" &&
+      file.mimeType === "application/vnd.google-apps.folder" &&
       file.name?.toLowerCase() === folder_name.toLowerCase()
     );
     if (existing_folder && existing_folder.id) {
@@ -264,7 +264,11 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
 }
 
 // Build folder structure
-async function build_folder_structure(root_folder_id: string, local_files: FileInfo[]): Promise<Map<string, string>> {
+async function build_folder_structure(
+  root_folder_id: string,
+  local_files: FileInfo[],
+  existing_folders: Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>
+): Promise<Map<string, string>> {
   const folder_map = new Map<string, string>();
   folder_map.set("", root_folder_id);
 
@@ -285,7 +289,13 @@ async function build_folder_structure(root_folder_id: string, local_files: FileI
     for (const part of parts) {
       current_path = current_path ? path.join(current_path, part) : part;
       if (!folder_map.has(current_path)) {
-        current_folder_id = await ensure_folder(current_folder_id, part);
+        const existing_folder = existing_folders.get(current_path);
+        if (existing_folder && existing_folder.id) {
+          core.info(`Using existing folder '${current_path}' with ID: ${existing_folder.id}`);
+          current_folder_id = existing_folder.id;
+        } else {
+          current_folder_id = await ensure_folder(current_folder_id, part);
+        }
         folder_map.set(current_path, current_folder_id);
       } else {
         current_folder_id = folder_map.get(current_path)!;
@@ -390,7 +400,7 @@ async function list_untracked_files(
       url: `https://drive.google.com/file/d/${file_info.id}`,
       name: path.basename(file_path),
       owner_email,
-      ownership_transfer_requested: ownership_transfer_requested_ids.has(file_info.id),
+      ownership_transfer_requested: ownership_transfer_requested_ids.has(file_id),
     });
   }
 
@@ -417,10 +427,10 @@ async function sync_to_drive() {
     let drive_folders: Map<string, { id: string; owned: boolean; permissions: DrivePermission[] }>;
 
     try {
-      folder_map = await build_folder_structure(folder_id, local_files);
       const drive_data = await list_drive_files_recursively(folder_id);
       drive_files = drive_data.files;
       drive_folders = drive_data.folders;
+      folder_map = await build_folder_structure(folder_id, local_files, drive_folders);
     } catch (error: unknown) {
       const err = error as any;
       core.warning(`Failed to initialize sync for folder ${folder_id}: ${err.message}`);
