@@ -425,34 +425,51 @@ async function execGit(command: string, args: string[]): Promise<void> {
   }
 }
 
-async function createPullRequestWithRetry(octokit, params, maxRetries = 3, delay = 1000) {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+async function create_pull_request_with_retry(
+  octokit: Octokit,
+  params: { owner: string; repo: string; title: string; head: string; body: string },
+  max_retries = 3,
+  initial_delay = 1000 // Renamed for clarity
+) {
+  let current_delay = initial_delay; // Use a separate variable for delay logic
+  for (let attempt = 0; attempt < max_retries; attempt++) {
     try {
-      // Fetch repository info to get the default branch
-      const repoInfo = await octokit.repos.get({
+      // Fetch repository info to get the default branch *inside* the loop
+      // to ensure the base is correct even if retrying after a delay.
+      const repo_info = await octokit.rest.repos.get({
         owner: params.owner,
         repo: params.repo,
       });
-      const defaultBranch = repoInfo.data.default_branch;
+      const default_branch = repo_info.data.default_branch;
+      core.info(`Default branch for ${params.owner}/${params.repo} is ${default_branch}`);
 
-      // Create the pull request
-      await octokit.pulls.create({
+      // Create the pull request using octokit.rest
+      core.info(`Attempting to create PR: head=${params.head} base=${default_branch}`);
+      await octokit.rest.pulls.create({
         owner: params.owner,
         repo: params.repo,
         title: params.title,
         head: params.head,
-        base: defaultBranch,
+        base: default_branch, // Use fetched default branch
         body: params.body,
       });
-      console.log("Pull request created successfully!");
-      return;
-    } catch (error) {
-      if ((error as any)["status"] === 404 && attempt < maxRetries - 1) {
-        console.log(`Attempt ${attempt + 1} failed with 404. Retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        delay *= 2; // Double the delay for the next attempt
+      core.info(`Pull request created successfully! (head: ${params.head}, base: ${default_branch})`);
+      return; // Success, exit the function
+    } catch (error: unknown) {
+      // Check if the error is an object and has a status property
+      const http_error = error as { status?: number; message?: string };
+      // Specifically retry on 404 (branch might not be fully propagated)
+      // or 422 (sometimes happens if base/head refs are briefly unavailable)
+      if ((http_error?.status === 404 || http_error?.status === 422) && attempt < max_retries - 1) {
+        core.warning(`Attempt ${attempt + 1} failed with status ${http_error.status}. Retrying in ${current_delay}ms... Error: ${http_error.message || error}`);
+        await new Promise(resolve => setTimeout(resolve, current_delay));
+        current_delay *= 2; // Exponential backoff
       } else {
-        throw error; // If it’s not a 404 or retries are exhausted, fail
+        core.error(`Failed to create pull request after ${attempt + 1} attempts.`);
+        if (http_error?.message) {
+          core.error(`Error details: Status ${http_error?.status}, Message: ${http_error.message}`);
+        }
+        throw error; // If it's not a retriable error or retries are exhausted, fail
       }
     }
   }
@@ -521,11 +538,11 @@ async function handle_drive_changes(folder_id: string) {
       await execGit("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
       await execGit("config", ["--local", "user.name", "github-actions[bot]"]);
 
-      const head = `sync-from-drive-${process.env.GITHUB_RUN_ID}`;
+      const head_branch = `sync-from-drive-${process.env.GITHUB_RUN_ID}`;
 
       await execGit("commit", ["-m", commit_messages.join("\n")]);
-      await execGit("checkout", ["-b", head]);
-      await execGit("push", ["origin", head]);
+      await execGit("checkout", ["-b", head_branch]);
+      await execGit("push", ["origin", head_branch]);
 
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
 
@@ -535,23 +552,29 @@ async function handle_drive_changes(folder_id: string) {
       });
       const base = repo_info.data.default_branch;
 
-      core.info("owner:" + owner);
-      core.info("repo:" + repo);
-      core.info("base:" + base);
-      core.info("head:" + head);
+      core.info(`Preparing to create PR for owner: ${owner}, repo: ${repo}, head: ${head_branch}`);
 
-      await octokit.rest.pulls.create({
-        owner,
-        repo,
+      // Construct parameters for the new function
+      const pr_params = {
+        owner: owner,
+        repo: repo,
         title: "Sync changes from Google Drive",
-        head,
-        base,
+        head: head_branch, // The branch that was just pushed
         body: "This PR syncs changes detected in Google Drive:\n" +
-          (new_files.length > 0 ? `- Added: ${new_files.map(f => f.path).join(", ")}\n` : "") +
-          (modified_files.length > 0 ? `- Updated: ${modified_files.map(f => f.path).join(", ")}\n` : "") +
+          (new_files.length > 0 ? `- Added: ${new_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") + // Added backticks for paths
+          (modified_files.length > 0 ? `- Updated: ${modified_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") +
           (deleted_files.length > 0 ? `- Removed: ${deleted_files.join(", ")}\n` : ""),
-      });
-      core.info("Pull request created for Drive changes");
+      };
+
+      // Call the refined function with retry logic
+      try {
+        await create_pull_request_with_retry(octokit, pr_params);
+        core.info("Pull request creation initiated successfully (might involve retries).");
+      } catch (pr_error) {
+        // Error is already logged inside create_pull_request_with_retry
+        core.setFailed(`Failed to create pull request: ${(pr_error as Error).message}`);
+        // Decide if you need to handle cleanup differently on PR failure
+      }
     }
   }
 
