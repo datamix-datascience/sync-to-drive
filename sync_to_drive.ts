@@ -472,25 +472,27 @@ async function handle_drive_changes(folder_id: string) {
   }
 
   if (changes_made) {
-    const commitMessages: string[] = [];
+    const commit_messages: string[] = [];
     if (new_files.length > 0) {
-      commitMessages.push(`drive-add: Add ${new_files.map(f => f.path).join(", ")}`);
+      commit_messages.push(`drive-add: Add ${new_files.map(f => f.path).join(", ")}`);
     }
     if (modified_files.length > 0) {
-      commitMessages.push(`drive-update: Update ${modified_files.map(f => f.path).join(", ")}`);
+      commit_messages.push(`drive-update: Update ${modified_files.map(f => f.path).join(", ")}`);
     }
     if (deleted_files.length > 0) {
-      commitMessages.push(`drive-remove: Remove ${deleted_files.join(", ")}`);
+      commit_messages.push(`drive-remove: Remove ${deleted_files.join(", ")}`);
     }
 
-    if (commitMessages.length > 0) {
+    if (commit_messages.length > 0) {
       // Configure Git identity
       await execGit("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
       await execGit("config", ["--local", "user.name", "github-actions[bot]"]);
 
-      await execGit("commit", ["-m", commitMessages.join("\n")]);
-      await execGit("checkout", ["-b", "sync-from-drive"]);
-      await execGit("push", ["origin", "sync-from-drive"]);
+      const BRANCH_NAME = "sync-from-drive-${GITHUB_RUN_ID}";
+
+      await execGit("commit", ["-m", commit_messages.join("\n")]);
+      await execGit("checkout", ["-b", BRANCH_NAME]);
+      await execGit("push", ["origin", BRANCH_NAME]);
 
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
 
@@ -508,7 +510,7 @@ async function handle_drive_changes(folder_id: string) {
         owner,
         repo,
         title: "Sync changes from Google Drive",
-        head: "sync-from-drive",
+        head: `sync-from-drive-${process.env.GITHUB_RUN_ID}`,
         base,
         body: "This PR syncs changes detected in Google Drive:\n" +
           (new_files.length > 0 ? `- Added: ${new_files.map(f => f.path).join(", ")}\n` : "") +
