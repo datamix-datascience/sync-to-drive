@@ -493,12 +493,23 @@ async function handle_drive_changes(folder_id: string) {
       await execGit("push", ["origin", "sync-from-drive"]);
 
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
+
+      const repo_info = await octokit.repos.get({
+        owner,
+        repo,
+      });
+      const base = repo_info.data.default_branch;
+
+      core.info("owner:" + owner);
+      core.info("repo:" + repo);
+      core.info("base:" + base);
+
       await octokit.rest.pulls.create({
         owner,
         repo,
         title: "Sync changes from Google Drive",
         head: "sync-from-drive",
-        base: "main",
+        base,
         body: "This PR syncs changes detected in Google Drive:\n" +
           (new_files.length > 0 ? `- Added: ${new_files.map(f => f.path).join(", ")}\n` : "") +
           (modified_files.length > 0 ? `- Updated: ${modified_files.map(f => f.path).join(", ")}\n` : "") +
