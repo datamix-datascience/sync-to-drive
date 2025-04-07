@@ -488,11 +488,11 @@ async function handle_drive_changes(folder_id: string) {
       await execGit("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
       await execGit("config", ["--local", "user.name", "github-actions[bot]"]);
 
-      const BRANCH_NAME = "sync-from-drive-${GITHUB_RUN_ID}";
+      const head = `sync-from-drive-${process.env.GITHUB_RUN_ID}`;
 
       await execGit("commit", ["-m", commit_messages.join("\n")]);
-      await execGit("checkout", ["-b", BRANCH_NAME]);
-      await execGit("push", ["origin", BRANCH_NAME]);
+      await execGit("checkout", ["-b", head]);
+      await execGit("push", ["origin", head]);
 
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
 
@@ -505,12 +505,13 @@ async function handle_drive_changes(folder_id: string) {
       core.info("owner:" + owner);
       core.info("repo:" + repo);
       core.info("base:" + base);
+      core.info("head:" + head);
 
       await octokit.rest.pulls.create({
         owner,
         repo,
         title: "Sync changes from Google Drive",
-        head: `sync-from-drive-${process.env.GITHUB_RUN_ID}`,
+        head,
         base,
         body: "This PR syncs changes detected in Google Drive:\n" +
           (new_files.length > 0 ? `- Added: ${new_files.map(f => f.path).join(", ")}\n` : "") +
