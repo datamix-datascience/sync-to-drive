@@ -98,7 +98,7 @@ const ownership_transfer_requested_ids = new Set<string>();
 // Compute file hash
 async function compute_hash(file_path: string): Promise<string> {
   const content = await fs_promises.readFile(file_path);
-  return createHash("sha1").update(content).digest("hex");
+  return createHash("md5").update(content).digest("hex");
 }
 
 // List local files
@@ -443,6 +443,7 @@ async function handle_drive_changes(folder_id: string) {
     if (!local_file) {
       new_files.push({ path: drive_path, id: drive_item.id });
     } else if (local_file.hash !== drive_item.hash) {
+      console.log(`File ${drive_path} differs: local=${local_file.hash}, drive=${drive_item.hash}`);
       modified_files.push({ path: drive_path, id: drive_item.id });
     }
   }
@@ -483,6 +484,10 @@ async function handle_drive_changes(folder_id: string) {
     }
 
     if (commitMessages.length > 0) {
+      // Configure Git identity
+      await execGit("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
+      await execGit("config", ["--local", "user.name", "github-actions[bot]"]);
+
       await execGit("commit", ["-m", commitMessages.join("\n")]);
       await execGit("checkout", ["-b", "sync-from-drive"]);
       await execGit("push", ["origin", "sync-from-drive"]);
