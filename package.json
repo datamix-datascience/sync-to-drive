@@ -8,10 +8,11 @@
   },
   "dependencies": {
     "@actions/core": "^1.11.1",
+    "@octokit/rest": "^21.1.1",
+    "glob": "^11.0.1",
     "googleapis": "^148.0.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.8.2",
-    "glob": "^11.0.1"
+    "typescript": "^5.8.2"
   },
   "devDependencies": {
     "esbuild": "^0.25.2"

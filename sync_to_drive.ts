@@ -6,6 +6,8 @@ import * as path from "path";
 import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { glob } from "glob";
+import { exec } from "@actions/exec";
+import { Octokit } from "@octokit/rest";
 
 // Config types
 interface SyncConfig {
@@ -86,6 +88,9 @@ const auth = new google.auth.JWT(
   ["https://www.googleapis.com/auth/drive"]
 );
 const drive = google.drive({ version: "v3", auth });
+
+// GitHub API setup
+const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
 // Track ownership transfer requests
 const ownership_transfer_requested_ids = new Set<string>();
@@ -385,48 +390,137 @@ async function request_ownership_transfer(file_id: string, current_owner_email: 
   }
 }
 
-// List untracked files (only files, not folders)
-async function list_untracked_files(
-  drive_files: Map<string, DriveItem>
-): Promise<UntrackedItem[]> {
-  const untracked_items: UntrackedItem[] = [];
-
-  for (const [file_path, file_info] of drive_files) {
-    const is_ignored = config.ignore.some(pattern =>
-      new RegExp(pattern.replace(/\*/g, ".*")).test(file_path)
-    );
-    if (is_ignored) {
-      continue;
-    }
-
-    const owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner");
-    const owner_email = owner?.emailAddress || "unknown";
-    untracked_items.push({
-      id: file_info.id,
-      path: file_path,
-      url: `https://drive.google.com/file/d/${file_info.id}`,
-      name: path.basename(file_path),
-      owner_email,
-      ownership_transfer_requested: ownership_transfer_requested_ids.has(file_info.id),
+// Download file from Drive
+async function download_file(file_id: string, local_path: string): Promise<void> {
+  try {
+    const dir = path.dirname(local_path);
+    await fs_promises.mkdir(dir, { recursive: true });
+    const res = await drive.files.get({ fileId: file_id, alt: "media" }, { responseType: "stream" });
+    const writer = fs.createWriteStream(local_path);
+    return new Promise((resolve, reject) => {
+      res.data
+        .pipe(writer)
+        .on("finish", () => {
+          core.info(`Downloaded file ${file_id} to ${local_path}`);
+          resolve();
+        })
+        .on("error", (err) => {
+          core.error(`Error downloading file ${file_id}: ${err.message}`);
+          reject(err);
+        });
     });
+  } catch (error) {
+    core.error(`Failed to download file ${file_id}: ${(error as Error).message}`);
+    throw error;
+  }
+}
+
+// Git execution helper
+async function execGit(command: string, args: string[]): Promise<void> {
+  try {
+    await exec("git", [command, ...args]);
+  } catch (error) {
+    core.error(`Git command failed: git ${command} ${args.join(" ")} - ${(error as Error).message}`);
+    throw error;
+  }
+}
+
+// Handle Drive changes with PR creation
+async function handle_drive_changes(folder_id: string) {
+  await execGit("checkout", ["-b", "original-state"]);
+  const local_files = await list_local_files(".");
+  const local_map = new Map(local_files.map(f => [f.relative_path.toLowerCase(), f]));
+
+  const { files: drive_files } = await list_drive_files_recursively(folder_id);
+  const drive_map = new Map(Array.from(drive_files).map(([path, item]) => [path.toLowerCase(), item]));
+
+  const new_files: { path: string; id: string }[] = [];
+  const modified_files: { path: string; id: string }[] = [];
+  const deleted_files: string[] = [];
+
+  for (const [drive_path, drive_item] of drive_map) {
+    const local_file = local_map.get(drive_path);
+    if (!local_file) {
+      new_files.push({ path: drive_path, id: drive_item.id });
+    } else if (local_file.hash !== drive_item.hash) {
+      modified_files.push({ path: drive_path, id: drive_item.id });
+    }
   }
 
-  return untracked_items;
+  for (const [local_path] of local_map) {
+    if (!drive_map.has(local_path)) {
+      deleted_files.push(local_path);
+    }
+  }
+
+  let changes_made = false;
+  for (const { path: file_path, id } of new_files) {
+    await download_file(id, file_path);
+    await execGit("add", [file_path]);
+    changes_made = true;
+  }
+  for (const { path: file_path, id } of modified_files) {
+    await download_file(id, file_path);
+    await execGit("add", [file_path]);
+    changes_made = true;
+  }
+  for (const file_path of deleted_files) {
+    await fs_promises.unlink(file_path).catch(() => { });
+    await execGit("rm", [file_path]);
+    changes_made = true;
+  }
+
+  if (changes_made) {
+    const commitMessages: string[] = [];
+    if (new_files.length > 0) {
+      commitMessages.push(`drive-add: Add ${new_files.map(f => f.path).join(", ")}`);
+    }
+    if (modified_files.length > 0) {
+      commitMessages.push(`drive-update: Update ${modified_files.map(f => f.path).join(", ")}`);
+    }
+    if (deleted_files.length > 0) {
+      commitMessages.push(`drive-remove: Remove ${deleted_files.join(", ")}`);
+    }
+
+    if (commitMessages.length > 0) {
+      await execGit("commit", ["-m", commitMessages.join("\n")]);
+      await execGit("checkout", ["-b", "sync-from-drive"]);
+      await execGit("push", ["origin", "sync-from-drive"]);
+
+      const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
+      await octokit.rest.pulls.create({
+        owner,
+        repo,
+        title: "Sync changes from Google Drive",
+        head: "sync-from-drive",
+        base: "main",
+        body: "This PR syncs changes detected in Google Drive:\n" +
+          (new_files.length > 0 ? `- Added: ${new_files.map(f => f.path).join(", ")}\n` : "") +
+          (modified_files.length > 0 ? `- Updated: ${modified_files.map(f => f.path).join(", ")}\n` : "") +
+          (deleted_files.length > 0 ? `- Removed: ${deleted_files.join(", ")}\n` : ""),
+      });
+      core.info("Pull request created for Drive changes");
+    }
+  }
+
+  await execGit("checkout", ["original-state"]);
+  await execGit("reset", ["--hard"]);
+  await execGit("checkout", ["main"]);
+  await execGit("branch", ["-D", "original-state"]);
 }
 
 // Main sync function
 async function sync_to_drive() {
   const local_files = await list_local_files(".");
-  core.info(`Files to sync: ${JSON.stringify(local_files.map(f => f.relative_path))}`);
   if (local_files.length === 0) {
-    core.setFailed("No files found in repository to sync (after applying ignore patterns)");
+    core.setFailed("No files found in repository to sync");
     return;
   }
 
   for (const target of config.targets.forks) {
-    core.info(`Processing target: ${JSON.stringify(target)}`);
     const folder_id = target.drive_folder_id;
 
+    await handle_drive_changes(folder_id);
     await accept_ownership_transfers(folder_id);
 
     let folder_map: Map<string, string>;
@@ -447,15 +541,7 @@ async function sync_to_drive() {
     const drive_link = `https://drive.google.com/drive/folders/${folder_id}`;
     core.setOutput("link", drive_link);
 
-    core.info(`Folder structure built: ${JSON.stringify([...folder_map])}`);
-    core.info(`Existing Drive files: ${JSON.stringify([...drive_files])}`);
-    core.info(`Existing Drive folders: ${JSON.stringify([...drive_folders])}`);
-
-    const local_file_map = new Map<string, FileInfo>();
-    for (const file of local_files) {
-      local_file_map.set(file.relative_path, file);
-    }
-
+    const local_file_map = new Map(local_files.map(f => [f.relative_path, f]));
     for (const [relative_path, local_file] of local_file_map) {
       const file_name = path.basename(relative_path);
       const dir_path = path.dirname(relative_path) || "";
@@ -463,24 +549,19 @@ async function sync_to_drive() {
       const drive_file = drive_files.get(relative_path);
 
       if (!drive_file) {
+        core.info(`New file in GitHub, uploading to Drive: ${relative_path}`);
         await upload_file(local_file.path, target_folder_id);
       } else if (drive_file.hash !== local_file.hash) {
+        core.info(`GitHub file newer, updating Drive (Drive was older): ${relative_path}`);
         await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
       }
       drive_files.delete(relative_path);
     }
 
-    let untracked_files_list: UntrackedItem[] = [];
     if (target.on_untrack === "remove") {
       for (const [file_path, file_info] of drive_files) {
-        const is_ignored = config.ignore.some(pattern =>
-          new RegExp(pattern.replace(/\*/g, ".*")).test(file_path)
-        );
-        if (is_ignored) {
-          continue;
-        }
-
-        core.info(`Attempting to trash file '${file_path}' (ID: ${file_info.id}, Owned: ${file_info.owned})`);
+        const is_ignored = config.ignore.some(pattern => new RegExp(pattern.replace(/\*/g, ".*")).test(file_path));
+        if (is_ignored) continue;
         if (!file_info.owned) {
           const current_owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
           if (current_owner && current_owner !== credentials_json.client_email) {
@@ -492,64 +573,6 @@ async function sync_to_drive() {
           drive_files.delete(file_path);
         }
       }
-
-      for (const [folder_path, folder_info] of drive_folders) {
-        if (!folder_map.has(folder_path)) {
-          const has_tracked_files = Array.from(drive_files.keys()).some(file_path =>
-            file_path.startsWith(folder_path + "/")
-          );
-          if (!has_tracked_files) {
-            core.info(`Attempting to trash folder '${folder_path}' (ID: ${folder_info.id}, Owned: ${folder_info.owned})`);
-            if (!folder_info.owned) {
-              const current_owner = folder_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
-              if (current_owner && current_owner !== credentials_json.client_email) {
-                await request_ownership_transfer(folder_info.id, current_owner);
-                continue;
-              }
-            }
-            if (await delete_untracked(folder_info.id, folder_path, true)) {
-              drive_folders.delete(folder_path);
-            }
-          }
-        }
-      }
-    } else if (target.on_untrack === "request") {
-      for (const [file_path, file_info] of drive_files) {
-        const is_ignored = config.ignore.some(pattern =>
-          new RegExp(pattern.replace(/\*/g, ".*")).test(file_path)
-        );
-        if (is_ignored) {
-          continue;
-        }
-
-        if (!file_info.owned) {
-          const current_owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
-          if (current_owner && current_owner !== credentials_json.client_email && !ownership_transfer_requested_ids.has(file_info.id)) {
-            await request_ownership_transfer(file_info.id, current_owner);
-          }
-        }
-      }
-
-      for (const [folder_path, folder_info] of drive_folders) {
-        if (!folder_map.has(folder_path)) {
-          const has_tracked_files = Array.from(drive_files.keys()).some(file_path =>
-            file_path.startsWith(folder_path + "/")
-          );
-          if (!has_tracked_files && !folder_info.owned) {
-            const current_owner = folder_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
-            if (current_owner && current_owner !== credentials_json.client_email && !ownership_transfer_requested_ids.has(folder_info.id)) {
-              await request_ownership_transfer(folder_info.id, current_owner);
-            }
-          }
-        }
-      }
-    }
-
-    untracked_files_list = await list_untracked_files(drive_files);
-    if (untracked_files_list.length > 0) {
-      core.warning(`Untracked files remaining in folder ${folder_id}:\n${JSON.stringify(untracked_files_list, null, 2)}`);
-    } else {
-      core.info(`No untracked files remaining in folder ${folder_id}`);
     }
 
     core.info(`Sync completed for folder ${folder_id}`);
