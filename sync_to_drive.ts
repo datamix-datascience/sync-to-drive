@@ -542,7 +542,7 @@ async function handle_drive_changes(folder_id: string) {
 
       await execGit("commit", ["-m", commit_messages.join("\n")]);
       await execGit("checkout", ["-b", head_branch]);
-      await execGit("push", ["origin", head_branch]);
+      await execGit("push", ["--force-with-lease", "origin", head_branch]);
 
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
 
