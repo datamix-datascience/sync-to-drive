@@ -425,6 +425,39 @@ async function execGit(command: string, args: string[]): Promise<void> {
   }
 }
 
+async function createPullRequestWithRetry(octokit, params, maxRetries = 3, delay = 1000) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Fetch repository info to get the default branch
+      const repoInfo = await octokit.repos.get({
+        owner: params.owner,
+        repo: params.repo,
+      });
+      const defaultBranch = repoInfo.data.default_branch;
+
+      // Create the pull request
+      await octokit.pulls.create({
+        owner: params.owner,
+        repo: params.repo,
+        title: params.title,
+        head: params.head,
+        base: defaultBranch,
+        body: params.body,
+      });
+      console.log("Pull request created successfully!");
+      return;
+    } catch (error) {
+      if ((error as any)["status"] === 404 && attempt < maxRetries - 1) {
+        console.log(`Attempt ${attempt + 1} failed with 404. Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay *= 2; // Double the delay for the next attempt
+      } else {
+        throw error; // If it’s not a 404 or retries are exhausted, fail
+      }
+    }
+  }
+}
+
 // Handle Drive changes with PR creation
 async function handle_drive_changes(folder_id: string) {
   await execGit("checkout", ["-b", "original-state"]);
