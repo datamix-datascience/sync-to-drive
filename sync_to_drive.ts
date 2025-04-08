@@ -6,7 +6,7 @@ import * as path from "path";
 import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { glob } from "glob";
-import { exec } from "@actions/exec";
+import { exec, getExecOutput } from "@actions/exec";
 import { Octokit } from "@octokit/rest";
 
 // Config types
@@ -64,6 +64,7 @@ interface UntrackedItem {
 
 interface DriveItem {
   id: string;
+  name: string;
   hash?: string;
   owned: boolean;
   permissions: DrivePermission[];
@@ -210,7 +211,8 @@ async function list_drive_files_recursively(
     const permissions = perm_res.data.permissions || [];
 
     if (file.mimeType === "application/vnd.google-apps.folder") {
-      folder_map.set(relative_path, { id: file.id, owned, permissions });
+
+      folder_map.set(relative_path, { id: file.id, name: file.name, owned, permissions });
       const subfolder_data = await list_drive_files_recursively(file.id, relative_path);
       for (const [sub_path, sub_file] of subfolder_data.files) {
         file_map.set(sub_path, sub_file);
@@ -219,7 +221,8 @@ async function list_drive_files_recursively(
         folder_map.set(sub_path, sub_folder);
       }
     } else {
-      file_map.set(relative_path, { id: file.id, hash: file.md5Checksum || "", owned, permissions });
+
+      file_map.set(relative_path, { id: file.id, name: file.name, hash: file.md5Checksum || "", owned, permissions });
     }
   }
 
@@ -476,48 +479,76 @@ async function create_pull_request_with_retry(
 }
 
 // Handle Drive changes with PR creation
-async function handle_drive_changes(folder_id: string) {
-  await execGit("checkout", ["-b", "original-state"]);
+async function handle_drive_changes(folder_id: string) { // folder_id is already passed in
+  // *** Create a unique temporary state branch name using the folder_id ***
+  const original_state_branch = `original-state-${folder_id}-${process.env.GITHUB_RUN_ID}`;
+  await execGit("checkout", ["-b", original_state_branch]); // Use unique name
+
   const local_files = await list_local_files(".");
+  // Convert local paths to lowercase for case-insensitive comparison (like Windows/macOS sometimes behave)
   const local_map = new Map(local_files.map(f => [f.relative_path.toLowerCase(), f]));
 
   const { files: drive_files } = await list_drive_files_recursively(folder_id);
+  // Convert drive paths to lowercase for case-insensitive comparison
   const drive_map = new Map(Array.from(drive_files).map(([path, item]) => [path.toLowerCase(), item]));
 
   const new_files: { path: string; id: string }[] = [];
   const modified_files: { path: string; id: string }[] = [];
   const deleted_files: string[] = [];
 
-  for (const [drive_path, drive_item] of drive_map) {
-    const local_file = local_map.get(drive_path);
+  // Compare Drive files against local files
+  for (const [drive_path_lower, drive_item] of drive_map) {
+    const local_file = local_map.get(drive_path_lower);
+    // Find the original case path from the Drive item name if possible, otherwise use lower case path
+    const drive_path_original_case = drive_item.name ? path.join(path.dirname(drive_path_lower), drive_item.name) : drive_path_lower;
+
     if (!local_file) {
-      new_files.push({ path: drive_path, id: drive_item.id });
+      // File exists in Drive, not locally -> New file from Drive
+      new_files.push({ path: drive_path_original_case, id: drive_item.id });
     } else if (local_file.hash !== drive_item.hash) {
-      core.info(`File ${drive_path} differs: local=${local_file.hash}, drive=${drive_item.hash}`);
-      modified_files.push({ path: drive_path, id: drive_item.id });
+      // File exists in both, but hashes differ -> Modified file from Drive
+      core.info(`File ${local_file.relative_path} differs: local=${local_file.hash}, drive=${drive_item.hash}`);
+      modified_files.push({ path: local_file.relative_path, id: drive_item.id }); // Use local path for consistency
+    }
+    // Remove processed files from local_map to find deleted ones later
+    local_map.delete(drive_path_lower);
+  }
+
+  // Any remaining files in local_map were not found in Drive -> Deleted file from Drive
+  for (const [local_path_lower, local_file] of local_map) {
+    // Check ignore list using the original relative path
+    const is_ignored = config.ignore.some(pattern => new RegExp(pattern.replace(/\*/g, ".*")).test(local_file.relative_path));
+    if (!is_ignored) {
+      deleted_files.push(local_file.relative_path); // Use original case path for git rm
+    } else {
+      core.info(`Skipping deletion of ignored file: ${local_file.relative_path}`);
     }
   }
 
-  for (const [local_path] of local_map) {
-    if (!drive_map.has(local_path)) {
-      deleted_files.push(local_path);
-    }
-  }
 
   let changes_made = false;
   for (const { path: file_path, id } of new_files) {
+    core.info(`Downloading new file from Drive: ${file_path} (ID: ${id})`);
     await download_file(id, file_path);
     await execGit("add", [file_path]);
     changes_made = true;
   }
   for (const { path: file_path, id } of modified_files) {
+    core.info(`Downloading modified file from Drive: ${file_path} (ID: ${id})`);
     await download_file(id, file_path);
     await execGit("add", [file_path]);
     changes_made = true;
   }
   for (const file_path of deleted_files) {
-    await fs_promises.unlink(file_path).catch(() => { });
-    await execGit("rm", [file_path]);
+    core.info(`Removing file deleted in Drive: ${file_path}`);
+    // Ensure the file actually exists locally before trying to remove
+    if (fs.existsSync(file_path)) {
+      await fs_promises.unlink(file_path).catch((err) => { core.warning(`Failed to unlink ${file_path}: ${err.message}`) });
+    } else {
+      core.info(`File ${file_path} already removed locally.`);
+    }
+    // Use git rm --ignore-unmatch in case unlink failed or file wasn't tracked
+    await execGit("rm", ["--ignore-unmatch", file_path]);
     changes_made = true;
   }
 
@@ -538,44 +569,99 @@ async function handle_drive_changes(folder_id: string) {
       await execGit("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
       await execGit("config", ["--local", "user.name", "github-actions[bot]"]);
 
-      const head_branch = `sync-from-drive-${process.env.GITHUB_RUN_ID}`;
+      // *** Create a unique head branch name using the folder_id ***
+      // Sanitize folder_id slightly for branch name (replace common problematic chars)
+      const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const head_branch = `sync-from-drive-${sanitized_folder_id}-${process.env.GITHUB_RUN_ID}`;
 
-      await execGit("commit", ["-m", commit_messages.join("\n")]);
-      await execGit("checkout", ["-b", head_branch]);
-      await execGit("push", ["--force", "origin", head_branch]);
-
-      const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
-
-      core.info(`Preparing to create PR for owner: ${owner}, repo: ${repo}, head: ${head_branch}`);
-
-      // Construct parameters for the new function
-      const pr_params = {
-        owner: owner,
-        repo: repo,
-        title: "Sync changes from Google Drive",
-        head: head_branch, // The branch that was just pushed
-        body: "This PR syncs changes detected in Google Drive:\n" +
-          (new_files.length > 0 ? `- Added: ${new_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") + // Added backticks for paths
-          (modified_files.length > 0 ? `- Updated: ${modified_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") +
-          (deleted_files.length > 0 ? `- Removed: ${deleted_files.join(", ")}\n` : ""),
-      };
-
-      // Call the refined function with retry logic
+      // Check if there are staged changes before committing
       try {
-        await create_pull_request_with_retry(octokit, pr_params);
-        core.info("Pull request creation initiated successfully (might involve retries).");
-      } catch (pr_error) {
-        // Error is already logged inside create_pull_request_with_retry
-        core.setFailed(`Failed to create pull request: ${(pr_error as Error).message}`);
-        // Decide if you need to handle cleanup differently on PR failure
+        await exec("git", ["diff", "--cached", "--quiet"]);
+        // If the above command succeeds (exit code 0), there are no staged changes.
+        core.info("No changes staged for commit. Skipping commit and PR creation for this target.");
+      } catch (error) {
+        // If the above command fails (non-zero exit code), there are staged changes. Proceed with commit.
+        core.info("Changes detected, proceeding with commit.");
+        await execGit("commit", ["-m", commit_messages.join("\n")]);
+        await execGit("checkout", ["-b", head_branch]); // Use unique name
+
+        // Use --force push. This is needed if a previous run for the SAME folder_id/run_id failed after push but before PR/cleanup.
+        // It ensures the latest state from Drive for this sync attempt gets pushed.
+        await execGit("push", ["--force", "origin", head_branch]);
+
+        const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
+
+        core.info(`Preparing to create PR for owner: ${owner}, repo: ${repo}, head: ${head_branch}`);
+
+        // Construct parameters for the new function
+        const pr_params = {
+          owner: owner,
+          repo: repo,
+          title: `Sync changes from Google Drive (${folder_id})`, // Add folder ID to title for clarity
+          head: head_branch, // The branch that was just pushed
+          body: `This PR syncs changes detected in Google Drive folder ${folder_id}:\n` +
+            (new_files.length > 0 ? `- Added: ${new_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") +
+            (modified_files.length > 0 ? `- Updated: ${modified_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") +
+            (deleted_files.length > 0 ? `- Removed: ${deleted_files.join(", ")}\n` : ""),
+        };
+
+        // Call the refined function with retry logic
+        try {
+          await create_pull_request_with_retry(octokit, pr_params);
+          core.info(`Pull request creation initiated successfully for branch ${head_branch}.`);
+        } catch (pr_error) {
+          core.setFailed(`Failed to create pull request for branch ${head_branch}: ${(pr_error as Error).message}`);
+          // Consider if cleanup needs to be different on PR failure. Currently, it proceeds.
+        }
+      } // End of try-catch for git diff
+    } else {
+      core.info("No commit messages generated, likely no effective changes detected.");
+    }
+  } else {
+    core.info("No changes detected between local state and Drive for this target.");
+  }
+
+
+  // *** Cleanup uses the unique temporary state branch name ***
+  // Check if main branch exists before checking out
+  try {
+    await execGit("rev-parse", ["--verify", "main"]);
+    await execGit("checkout", ["main"]);
+  } catch (error) {
+    core.warning("Could not checkout 'main', attempting to checkout default branch from origin...");
+    try {
+      // Fetch origin to ensure we know about remote branches
+      await execGit("fetch", ["origin"]);
+      // Find the default branch (HEAD points to it)
+      const default_branch_output = await getExecOutput("git", ["remote", "show", "origin"], { silent: true });
+      if (default_branch_output.exitCode === 0) { // Check the exit code from the result object
+        // Access stdout from the result object
+        const match = default_branch_output.stdout.match(/HEAD branch:\s*(.+)/);
+        if (match && match[1]) {
+          const default_branch = match[1].trim();
+          core.info(`Checking out default branch: ${default_branch}`);
+          await execGit("checkout", [default_branch]);
+        } else {
+          core.warning("Could not determine default branch from 'git remote show origin' output. Skipping checkout.");
+          core.info(`stdout was: ${default_branch_output.stdout}`); // Log output for debugging
+        }
+      } else {
+        core.warning(`'git remote show origin' failed with exit code ${default_branch_output.exitCode}. Skipping checkout.`);
+        core.warning(`stderr was: ${default_branch_output.stderr}`); // Log error for debugging
       }
+    } catch (fetchError) {
+      // This catch might be less likely now with ignoreReturnCode, but keep for other potential errors
+      core.error(`Failed during fetch/checkout attempt: ${(fetchError as Error).message}`);
     }
   }
 
-  await execGit("checkout", ["original-state"]);
-  await execGit("reset", ["--hard"]);
-  await execGit("checkout", ["main"]);
-  await execGit("branch", ["-D", "original-state"]);
+  // Resetting should happen *after* checking out the target branch (main/default)
+  // This reset isn't strictly necessary anymore with the unique original-state branch,
+  // but it ensures the working directory is clean relative to main/default.
+  await execGit("reset", ["--hard", `HEAD`]); // Reset to the current HEAD (main/default)
+
+  // Delete the unique temporary state branch
+  await execGit("branch", ["-D", original_state_branch]);
 }
 
 // Main sync function
@@ -588,6 +674,7 @@ async function sync_to_drive() {
 
   for (const target of config.targets.forks) {
     const folder_id = target.drive_folder_id;
+    core.info(`Starting sync process for Drive folder: ${folder_id}`);
 
     await handle_drive_changes(folder_id);
     await accept_ownership_transfers(folder_id);
@@ -627,22 +714,78 @@ async function sync_to_drive() {
       drive_files.delete(relative_path);
     }
 
+
+    // *** Add logging for ignore check during untracked file removal ***
     if (target.on_untrack === "remove") {
       for (const [file_path, file_info] of drive_files) {
-        const is_ignored = config.ignore.some(pattern => new RegExp(pattern.replace(/\*/g, ".*")).test(file_path));
-        if (is_ignored) continue;
+        // Convert to lower case for comparison consistency if needed, but use original path for logging/ignore check
+        const file_path_lower = file_path.toLowerCase();
+
+        // Check ignore patterns against the original file path from Drive
+        const is_ignored = config.ignore.some(pattern => {
+          // Basic glob-like conversion: * -> .*, ? -> . (adjust if more complex patterns needed)
+          const regexPattern = pattern.replace(/\*/g, ".*").replace(/\?/g, ".");
+          // Ensure pattern matches whole path segments if needed (e.g., using ^ and $ anchors if necessary)
+          // Example: Check if the file_path starts with the pattern (if pattern represents a directory)
+          // Or if the pattern exactly matches the file_path
+          return new RegExp(`^${regexPattern}$`).test(file_path);
+        });
+
+        if (is_ignored) {
+          core.info(`Untracked file/folder in Drive is ignored by config: ${file_path}`);
+          drive_files.delete(file_path); // Remove from map so it's not processed further
+          continue; // Skip ownership check and deletion for ignored items
+        }
+
+        // Check ownership only if not ignored
         if (!file_info.owned) {
           const current_owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
           if (current_owner && current_owner !== credentials_json.client_email) {
+            core.warning(`Untracked file/folder in Drive not owned by service account and not ignored: ${file_path}. Owner: ${current_owner}`);
             await request_ownership_transfer(file_info.id, current_owner);
-            continue;
+            drive_files.delete(file_path); // Remove from map as ownership transfer requested
+            continue; // Skip deletion attempt for now
+          } else {
+            core.info(`Untracked file/folder in Drive has no owner or is owned by service account: ${file_path}. Proceeding with deletion check.`);
           }
+        } else {
+          core.info(`Untracked file/folder in Drive is owned by service account: ${file_path}. Proceeding with deletion check.`);
         }
-        if (await delete_untracked(file_info.id, file_path)) {
-          drive_files.delete(file_path);
+
+        // Delete the untracked item (only if owned or owner check passed)
+        core.info(`Untracked file/folder in Drive will be removed: ${file_path}`);
+        if (await delete_untracked(file_info.id, file_path)) { // Pass original path for logging
+          drive_files.delete(file_path); // Remove from map after successful deletion
+        } else {
+          // Keep it in the map if deletion failed, maybe log differently?
+          core.warning(`Failed to delete untracked file/folder from Drive: ${file_path}`);
+        }
+      }
+    } else if (target.on_untrack === 'ignore' || target.on_untrack === 'request') {
+      // Log if untracked files exist but won't be removed
+      if (drive_files.size > 0) {
+        core.info(`Found ${drive_files.size} untracked file(s)/folder(s) in Drive for folder ${folder_id}. Action 'on_untrack' is set to '${target.on_untrack}'.`);
+        // Optionally list them if needed for debugging
+        // for (const [file_path] of drive_files) {
+        //    core.info(` - Untracked: ${file_path}`);
+        // }
+        if (target.on_untrack === 'request') {
+          core.warning(`Ownership transfer requests might be needed for untracked items if not owned by the service account.`);
+          // Add logic similar to 'remove' block to request transfer if needed, but don't delete
+          for (const [file_path, file_info] of drive_files) {
+            const is_ignored = config.ignore.some(pattern => new RegExp(pattern.replace(/\*/g, ".*")).test(file_path));
+            if (is_ignored) continue;
+            if (!file_info.owned) {
+              const current_owner = file_info.permissions.find((p: DrivePermission) => p.role === "owner")?.emailAddress;
+              if (current_owner && current_owner !== credentials_json.client_email) {
+                await request_ownership_transfer(file_info.id, current_owner);
+              }
+            }
+          }
         }
       }
     }
+
 
     core.info(`Sync completed for folder ${folder_id}`);
   }
