@@ -963,12 +963,11 @@ async function sync_to_drive() {
   const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
   core.info(`Syncing repository: ${owner}/${repo}`);
 
-  // Initial local file listing (respecting .gitignore and config.ignore)
+  // Initial local file listing is still useful for the first outgoing sync pass
   const initial_local_files = await list_local_files(".");
   if (initial_local_files.length === 0) {
     core.warning("No relevant local files found to sync based on ignore rules. Nothing to push to Drive.");
-    // Decide if you still want to check for incoming changes
-    // return; // Option to exit early
+    // Decide if you still want to check for incoming changes from Drive later
   } else {
     core.info(`Found ${initial_local_files.length} initial local files for potential sync.`);
   }
@@ -981,118 +980,104 @@ async function sync_to_drive() {
 
 
     try {
-      // *** Step 1: Handle Incoming Changes from Drive (Download to local, create PR if needed) ***
-      // This function now handles checkout, comparison, download, commit, push, PR creation
-      await handle_drive_changes(folder_id);
+      // *** NEW ORDER STEP 1: Sync Outgoing Changes (Local -> Drive) FIRST ***
+      // This ensures files just pushed to Git are uploaded to Drive before comparison
+      core.info("Step 1: Processing outgoing changes (local -> Drive)...");
 
-      // *** Step 2: Accept Pending Ownership Transfers (Optional but recommended) ***
-      core.info("Checking for and accepting pending ownership transfers...");
-      await accept_ownership_transfers(folder_id); // Accept for the root and recursively
-
-      // *** Step 3: Sync Outgoing Changes (Local -> Drive) ***
-      core.info("Processing outgoing changes (local -> Drive)...");
-
-      // Re-list local files *after* potential updates from handle_drive_changes
-      // This ensures we push the merged state (original + drive changes) to Drive
+      // List local files *at this point in time*
       const current_local_files = await list_local_files(".");
       const current_local_map = new Map(current_local_files.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
-      core.info(`Found ${current_local_map.size} local files after handling Drive changes.`);
+      core.info(`Found ${current_local_map.size} local files for outgoing sync.`);
 
-
-      // List Drive content *again* to get the latest state after potential deletions/uploads
-      // This might seem redundant but ensures accuracy for the outgoing sync part
-      core.info("Re-listing Drive content for outgoing sync comparison...");
-      let drive_files_map: Map<string, DriveItem>;
-      let drive_folders_map: Map<string, DriveItem>;
+      // List Drive content to compare against
+      core.info("Listing Drive content for outgoing sync comparison...");
+      let drive_files_map_outgoing: Map<string, DriveItem>;
+      let drive_folders_map_outgoing: Map<string, DriveItem>;
       try {
-        const drive_data = await list_drive_files_recursively(folder_id);
-        drive_files_map = new Map(Array.from(drive_data.files.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
-        drive_folders_map = new Map(Array.from(drive_data.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
-        core.info(`Found ${drive_files_map.size} files and ${drive_folders_map.size} folders in Drive for outgoing sync.`);
+        const drive_data_outgoing = await list_drive_files_recursively(folder_id);
+        drive_files_map_outgoing = new Map(Array.from(drive_data_outgoing.files.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
+        drive_folders_map_outgoing = new Map(Array.from(drive_data_outgoing.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
+        core.info(`Found ${drive_files_map_outgoing.size} files and ${drive_folders_map_outgoing.size} folders in Drive for outgoing sync.`);
       } catch (listError) {
-        core.error(`Failed to list Drive content before outgoing sync for folder ${folder_id}: ${(listError as Error).message}. Skipping outgoing sync.`);
-        core.endGroup();
-        continue; // Skip to next target
+        core.error(`Failed to list Drive content before outgoing sync for folder ${folder_id}: ${(listError as Error).message}. Skipping outgoing sync for this target.`);
+        // We might still want to attempt the incoming sync later, so don't 'continue' the whole loop yet
+        drive_files_map_outgoing = new Map(); // Use empty maps if listing failed
+        drive_folders_map_outgoing = new Map();
       }
-
 
       // Build/verify folder structure in Drive based on current local files
       core.info("Ensuring Drive folder structure matches local structure...");
       let folder_path_to_id_map: Map<string, string>;
-      try {
-        folder_path_to_id_map = await build_folder_structure(folder_id, current_local_files, drive_folders_map);
-      } catch (structureError) {
-        core.error(`Failed to build Drive folder structure for ${folder_id}: ${(structureError as Error).message}. Skipping outgoing sync.`);
-        core.endGroup();
-        continue; // Skip to next target
+      if (current_local_map.size > 0 && drive_folders_map_outgoing) { // Only build if there are local files and drive folders were listed
+        try {
+          folder_path_to_id_map = await build_folder_structure(folder_id, current_local_files, drive_folders_map_outgoing);
+        } catch (structureError) {
+          core.error(`Failed to build Drive folder structure for ${folder_id}: ${(structureError as Error).message}. Skipping upload/update part of outgoing sync.`);
+          folder_path_to_id_map = new Map(); // Use empty map if structure build failed
+        }
+      } else {
+        folder_path_to_id_map = new Map(); // No local files or drive folders listed, init empty map
+        folder_path_to_id_map.set("", folder_id); // Ensure root ID is present
+        core.info("Skipping folder structure build (no local files or Drive folder listing failed).")
       }
-
 
       // Upload/Update local files to Drive
       core.info("Uploading/updating files from local to Drive...");
-      const files_to_keep_in_drive = new Set<string>(); // Track files that should remain
+      const files_synced_to_drive = new Set<string>(); // Track files processed in this step
 
-      for (const [relative_path, local_file] of current_local_map) {
-        files_to_keep_in_drive.add(relative_path); // Mark this path as active
-        const drive_file = drive_files_map.get(relative_path);
-        const file_name = path.basename(relative_path);
-        const dir_path = path.dirname(relative_path);
-        // Handle root directory case ('.') -> map to empty string for lookup
-        const parent_dir_lookup = (dir_path === '.') ? "" : dir_path.replace(/\\/g, '/');
-        const target_folder_id = folder_path_to_id_map.get(parent_dir_lookup);
+      if (folder_path_to_id_map.size > 0) { // Only attempt uploads if folder map is valid
+        for (const [relative_path, local_file] of current_local_map) {
+          files_synced_to_drive.add(relative_path); // Mark this path as active/processed
+          const drive_file = drive_files_map_outgoing.get(relative_path);
+          const file_name = path.basename(relative_path);
+          const dir_path = path.dirname(relative_path);
+          const parent_dir_lookup = (dir_path === '.') ? "" : dir_path.replace(/\\/g, '/');
+          const target_folder_id = folder_path_to_id_map.get(parent_dir_lookup);
 
 
-        if (!target_folder_id) {
-          core.warning(`Could not find target folder ID for local file '${relative_path}' (parent path '${parent_dir_lookup}'). Skipping upload.`);
-          continue;
-        }
-
-        if (!drive_file) {
-          core.info(`New file in Git Repo, uploading to Drive: ${relative_path}`);
-          await upload_file(local_file.path, target_folder_id);
-        } else {
-          // Compare hashes if Drive file hash is available
-          if (drive_file.hash && drive_file.hash !== local_file.hash) {
-            core.info(`Local file changed, updating Drive: ${relative_path} (Local: ${local_file.hash}, Drive: ${drive_file.hash})`);
-            await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
-          } else if (!drive_file.hash && drive_file.mimeType && !drive_file.mimeType.startsWith('application/vnd.google-apps')) { // Check mimeType exists before accessing
-            // Drive hash missing, potentially large file or issue. Re-upload to be safe? Or skip?
-            // Policy: Let's try updating it. If it's unchanged, Drive API might handle it efficiently.
-            core.info(`Local file exists, Drive hash missing. Attempting update: ${relative_path}`);
-            await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
-          } else {
-            // Hashes match or it's a Google Doc type - no upload needed.
-            // Also handles case where mimeType is missing for some reason
-            // core.debug(`File ${relative_path} hasn't changed locally or is Google Doc/Unknown Type. No upload needed.`);
+          if (!target_folder_id) {
+            core.warning(`Could not find target folder ID for local file '${relative_path}' (parent path '${parent_dir_lookup}'). Skipping upload.`);
+            continue;
           }
-          // Check if file name needs updating (e.g., case change) even if content is same
-          // Check hash equality *only if both exist*. If drive_file.hash is missing, we might have updated above.
-          const hashes_match_or_drive_missing = !drive_file.hash || (local_file.hash === drive_file.hash);
-          if (drive_file.name !== file_name && hashes_match_or_drive_missing) {
-            core.info(`Updating filename in Drive for ${relative_path} from '${drive_file.name}' to '${file_name}'`);
-            try {
-              await drive.files.update({
-                fileId: drive_file.id,
-                requestBody: { name: file_name },
-                // supportsAllDrives: true // if needed
-              });
-            } catch (renameError) {
-              core.warning(`Failed to rename file ${drive_file.id} to '${file_name}': ${(renameError as Error).message}`);
+
+          // --- Upload/Update Logic (remains the same) ---
+          if (!drive_file) {
+            core.info(`New file in Git Repo, uploading to Drive: ${relative_path}`);
+            await upload_file(local_file.path, target_folder_id);
+          } else {
+            if (drive_file.hash && drive_file.hash !== local_file.hash) {
+              core.info(`Local file changed, updating Drive: ${relative_path} (Local: ${local_file.hash}, Drive: ${drive_file.hash})`);
+              await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
+            } else if (!drive_file.hash && drive_file.mimeType && !drive_file.mimeType.startsWith('application/vnd.google-apps')) {
+              core.info(`Local file exists, Drive hash missing. Attempting update: ${relative_path}`);
+              await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
+            }
+            const hashes_match_or_drive_missing = !drive_file.hash || (local_file.hash === drive_file.hash);
+            if (drive_file.name !== file_name && hashes_match_or_drive_missing) {
+              core.info(`Updating filename in Drive for ${relative_path} from '${drive_file.name}' to '${file_name}'`);
+              try {
+                await drive.files.update({ fileId: drive_file.id, requestBody: { name: file_name } });
+              } catch (renameError) {
+                core.warning(`Failed to rename file ${drive_file.id} to '${file_name}': ${(renameError as Error).message}`);
+              }
             }
           }
+          // --- End of Upload/Update Logic ---
         }
+      } else {
+        core.info("Skipping upload/update phase due to issues in previous steps (folder listing/structure).");
       }
 
-      // *** Step 4: Handle Untracked Files/Folders in Drive ***
-      core.info(`Handling untracked items in Drive based on action: '${on_untrack_action}'...`);
 
-      // Identify items in Drive that are NOT in the current local file list (files_to_keep_in_drive)
-      const untracked_drive_files = Array.from(drive_files_map.entries())
-        .filter(([path, _item]) => !files_to_keep_in_drive.has(path));
-      const untracked_drive_folders = Array.from(drive_folders_map.entries())
-        // Keep folders only if they are NOT required by any current local file path
-        .filter(([path, _item]) => !Array.from(files_to_keep_in_drive).some(localPath => localPath.startsWith(path + '/')));
+      // *** NEW ORDER STEP 2: Handle Untracked Files/Folders in Drive ***
+      // This cleans up Drive based on the local state *after* the upload attempt.
+      // It needs the Drive file lists fetched just before the upload step.
+      core.info("Step 2: Handling untracked items in Drive...");
 
+      const untracked_drive_files = Array.from(drive_files_map_outgoing.entries())
+        .filter(([path, _item]) => !files_synced_to_drive.has(path)); // Compare against files processed in Step 1
+      const untracked_drive_folders = Array.from(drive_folders_map_outgoing.entries())
+        .filter(([path, _item]) => !Array.from(files_synced_to_drive).some(localPath => localPath.startsWith(path + '/')));
 
       core.info(`Found ${untracked_drive_files.length} untracked files and ${untracked_drive_folders.length} potentially untracked folders in Drive.`);
 
@@ -1101,50 +1086,33 @@ async function sync_to_drive() {
         ...untracked_drive_folders.map(([path, item]) => ({ path, item, isFolder: true }))
       ];
 
-
+      // --- Untracked Handling Logic (remains the same) ---
       if (all_untracked_items.length > 0) {
         if (on_untrack_action === "ignore") {
           core.info(`Ignoring ${all_untracked_items.length} untracked item(s) in Drive as per config.`);
-          // Optionally log the items being ignored:
-          // all_untracked_items.forEach(u => core.debug(` - Ignored untracked ${u.isFolder ? 'folder' : 'file'}: ${u.path}`));
         } else {
-          // Process for 'remove' or 'request'
           for (const { path: untracked_path, item: untracked_item, isFolder } of all_untracked_items) {
             core.info(`Processing untracked ${isFolder ? 'folder' : 'file'} in Drive: ${untracked_path} (ID: ${untracked_item.id})`);
-
-            // Check ownership BEFORE deciding action
             if (!untracked_item.owned) {
               const current_owner = untracked_item.permissions?.find(p => p.role === 'owner')?.emailAddress;
               if (current_owner && current_owner !== credentials_json.client_email) {
                 core.warning(`Untracked item '${untracked_path}' is owned by ${current_owner}. Requesting ownership transfer.`);
                 await request_ownership_transfer(untracked_item.id, current_owner);
-                // Whether action is 'remove' or 'request', we request transfer if not owned.
-                // If action is 'remove', we skip deletion this time, hoping transfer succeeds for next run.
-                continue; // Skip deletion/further processing for this item this run
+                continue;
               } else {
-                // No owner found or owned by someone unexpected, but not the specific service account.
-                // This is an odd state. Log it. Maybe treat as owned for deletion? Or skip?
-                // Explicitly type 'o' here
-                const ownerEmailsFromPermissions = untracked_item.permissions
-                  ?.filter(p => p.role === 'owner') // Filter for permissions with role 'owner'
-                  .map(p => p.emailAddress || 'Unknown Email') // Get their email address
-                  .join(',') || 'None found in permissions'; // Join emails or provide fallback text
+                const ownerEmailsFromPermissions = untracked_item.permissions?.filter(p => p.role === 'owner').map(p => p.emailAddress || 'Unknown Email').join(',') || 'None found in permissions';
                 core.warning(`Untracked item '${untracked_path}' has unclear ownership (Owners: ${ownerEmailsFromPermissions}, Permissions: ${JSON.stringify(untracked_item.permissions)}).`);
-                // Policy Decision: Skip deletion if ownership is unclear? Or attempt deletion if owned by service account is false?
-                // Let's skip deletion if not explicitly owned by the service account.
                 if (on_untrack_action === 'remove') {
                   core.warning(`Skipping removal of '${untracked_path}' due to unclear ownership.`);
                   continue;
                 }
               }
             } else {
-              // Item IS owned by the service account.
               core.info(`Untracked item '${untracked_path}' is owned by the service account.`);
               if (on_untrack_action === "remove") {
                 core.info(`Proceeding with removal (moving to trash) of owned untracked item '${untracked_path}'.`);
                 await delete_untracked(untracked_item.id, untracked_path, isFolder);
               } else if (on_untrack_action === "request") {
-                // Action is 'request', but we already own it. Nothing to request. Log it.
                 core.info(`Untracked item '${untracked_path}' is already owned. No action needed for 'request' strategy.`);
               }
             }
@@ -1153,12 +1121,28 @@ async function sync_to_drive() {
       } else {
         core.info("No untracked items found in Drive for this target.");
       }
+      // --- End of Untracked Handling Logic ---
+
+
+      // *** NEW ORDER STEP 3: Accept Pending Ownership Transfers ***
+      // Can run after potential new transfer requests in the untracked step
+      core.info("Step 3: Checking for and accepting pending ownership transfers...");
+      await accept_ownership_transfers(folder_id);
+
+
+      // *** NEW ORDER STEP 4: Handle Incoming Changes from Drive (Drive -> Local PR) ***
+      // This now runs LAST, comparing the potentially updated Drive state against the local Git state.
+      // Drive state *should* now include files uploaded in Step 1.
+      core.info("Step 4: Handling potential incoming changes from Drive (Drive -> Local PR)...");
+      // Add a small delay maybe? To give Drive API extra time to become consistent after uploads/deletes.
+      // await new Promise(resolve => setTimeout(resolve, 5000)); // Optional 5-second delay
+      // core.info("Proceeding with incoming change check after delay.");
+      await handle_drive_changes(folder_id);
 
 
     } catch (error) {
       core.error(`Unhandled error during sync process for Drive folder ${folder_id}: ${(error as Error).message}`);
-      // Optionally set job status to failure here if needed
-      // core.setFailed(`Sync failed for folder ${folder_id}`);
+      // core.setFailed(`Sync failed for folder ${folder_id}`); // Optionally fail job
     } finally {
       core.setOutput(`drive_link_${folder_id}`, `https://drive.google.com/drive/folders/${folder_id}`);
       core.info(`Sync process finished for Drive folder: ${folder_id}`);
@@ -1173,6 +1157,6 @@ async function sync_to_drive() {
 sync_to_drive().catch((error: unknown) => {
   const err = error as Error;
   core.error(`Top-level error caught: ${err.message}`);
-  core.error(err.stack || "No stack trace available."); // Log stack trace for debugging
+  core.error(err.stack || "No stack trace available.");
   core.setFailed(`Sync failed: ${err.message}`);
 });
