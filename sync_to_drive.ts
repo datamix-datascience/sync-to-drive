@@ -1129,7 +1129,7 @@ async function sync_to_drive() {
                   ?.filter(p => p.role === 'owner') // Filter for permissions with role 'owner'
                   .map(p => p.emailAddress || 'Unknown Email') // Get their email address
                   .join(',') || 'None found in permissions'; // Join emails or provide fallback text
-                core.warning(`Untracked item '${untracked_path}' has unclear ownership (Owners: ${ownerEmails}, Permissions: ${JSON.stringify(untracked_item.permissions)}).`);
+                core.warning(`Untracked item '${untracked_path}' has unclear ownership (Owners: ${ownerEmailsFromPermissions}, Permissions: ${JSON.stringify(untracked_item.permissions)}).`);
                 // Policy Decision: Skip deletion if ownership is unclear? Or attempt deletion if owned by service account is false?
                 // Let's skip deletion if not explicitly owned by the service account.
                 if (on_untrack_action === 'remove') {
