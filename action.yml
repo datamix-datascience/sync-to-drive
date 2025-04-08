@@ -8,6 +8,9 @@ inputs:
     description: "GitHub token for API calls (e.g., creating PRs)"
     required: true
     default: ${{ github.token }}
+  trigger_event_name:
+    description: "The event name that triggered the workflow (e.g., push, schedule)"
+    required: true
 runs:
   using: "node20"
   main: "dist/sync_to_drive.js"

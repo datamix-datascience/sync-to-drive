@@ -95,6 +95,8 @@ const drive = google.drive({ version: "v3", auth });
 const github_token_input = core.getInput('github_token', { required: true })
 const octokit = new Octokit({ auth: github_token_input });
 
+// --- Get Trigger Event Name ---
+const trigger_event_name = core.getInput('trigger_event_name', { required: true });
 
 // Track ownership transfer requests
 const ownership_transfer_requested_ids = new Set<string>();
@@ -163,7 +165,6 @@ async function list_local_files(root_dir: string): Promise<FileInfo[]> {
   core.info(`Found ${files.length} local files to potentially sync.`);
   return files;
 }
-
 
 // Accept Pending Ownership Transfers
 async function accept_ownership_transfers(file_id: string) {
@@ -571,7 +572,6 @@ async function download_file(file_id: string, local_path: string): Promise<void>
   }
 }
 
-
 // Exec Git Helper
 async function execGit(command: string, args: string[], options: { ignoreReturnCode?: boolean, silent?: boolean } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   core.debug(`Executing: git ${command} ${args.join(" ")}`);
@@ -644,8 +644,12 @@ async function create_pull_request_with_retry(
 }
 
 // Handle Drive changes with PR creation - UPDATED
-async function handle_drive_changes(folder_id: string, on_untrack_action: "ignore" | "remove" | "request") { // <-- Added parameter
-  core.info(`Handling potential incoming changes from Drive folder: ${folder_id} (Untrack action: ${on_untrack_action})`);
+async function handle_drive_changes(
+  folder_id: string,
+  on_untrack_action: "ignore" | "remove" | "request",
+  trigger_event_name: string // <-- Added parameter
+) {
+  core.info(`Handling potential incoming changes from Drive folder: ${folder_id} (Trigger: ${trigger_event_name}, Untrack action: ${on_untrack_action})`);
 
   // *** 1. Get original state ***
   const run_id = process.env.GITHUB_RUN_ID || Date.now();
@@ -654,10 +658,10 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
   const initial_branch = current_branch_result.stdout.trim();
   core.info(`Current branch is '${initial_branch}'. Creating temporary state branch '${original_state_branch}'`);
   const initial_commit_hash = (await execGit('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
-  await execGit("checkout", ["-b", original_state_branch, initial_commit_hash]); // Create branch from specific commit
+  await execGit("checkout", ["-b", original_state_branch, initial_commit_hash]);
 
   // *** 2. List local and Drive files ***
-  const local_files_list = await list_local_files("."); // List from original_state branch
+  const local_files_list = await list_local_files(".");
   const local_map = new Map(local_files_list.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
   core.info(`Found ${local_map.size} relevant local files in original state.`);
   const local_lower_to_original_key = new Map(Array.from(local_map.keys()).map(key => [key.toLowerCase(), key]));
@@ -665,7 +669,6 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
 
   let drive_files: Map<string, DriveItem>;
   let drive_folders: Map<string, DriveItem>;
-
   try {
     core.info("Listing Drive content for incoming change comparison...");
     const drive_data = await list_drive_files_recursively(folder_id);
@@ -673,7 +676,7 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
     drive_folders = new Map(Array.from(drive_data.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
     core.info(`Found ${drive_files.size} files and ${drive_folders.size} folders in Drive.`);
   } catch (error) {
-    core.error(`Failed to list Drive content for folder ${folder_id} during incoming check: ${(error as Error).message}. Aborting.`);
+    core.error(`Failed list Drive content for folder ${folder_id} during incoming check: ${(error as Error).message}. Aborting.`);
     await execGit("checkout", [initial_branch]);
     await execGit("branch", ["-D", original_state_branch]);
     return;
@@ -681,7 +684,7 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
 
   const new_files: { path: string; id: string }[] = [];
   const modified_files: { path: string; id: string; local_hash: string; drive_hash?: string }[] = [];
-  const deleted_files: string[] = []; // Files present locally, missing in Drive
+  const deleted_files: string[] = [];
   const found_local_keys = new Set<string>();
 
   // *** 3. Compare Drive state to local state (Case-Insensitive Lookup) ***
@@ -702,10 +705,8 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
         core.info(` -> Local hash: ${local_file.hash}, Drive hash: ${drive_item.hash}`);
         modified_files.push({ path: drive_path, id: drive_item.id, local_hash: local_file.hash, drive_hash: drive_item.hash });
       } else if (!drive_item.hash && drive_item.mimeType && !drive_item.mimeType.startsWith('application/vnd.google-apps')) {
-        core.warning(`Drive file ${drive_path} exists locally but has no md5Checksum in Drive. Cannot verify modification. Skipping update from Drive.`);
-      } else {
-        core.debug(`File '${drive_path}' found locally and hashes match or is Google Doc. No modification needed.`);
-      }
+        core.warning(`Drive file ${drive_path} exists locally but has no md5Checksum. Cannot verify modification. Skipping update from Drive.`);
+      } else { core.debug(`File '${drive_path}' found locally and hashes match or is Google Doc. No modification needed.`); }
     }
   }
 
@@ -726,43 +727,42 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
   // --- Handle New Files ---
   core.debug(`Applying changes: ${new_files.length} new, ${modified_files.length} modified, ${deleted_files.length} potentially deleted.`);
   for (const { path: file_path, id } of new_files) {
-    try {
-      core.info(`Downloading new file from Drive: ${file_path} (ID: ${id})`);
-      await download_file(id, file_path);
-      await execGit("add", [file_path]);
-      changes_staged = true;
-    } catch (error) {
-      core.error(`Failed to download or stage new file ${file_path}: ${(error as Error).message}`);
-    }
+    try { core.info(`Downloading new file from Drive: ${file_path} (ID: ${id})`); await download_file(id, file_path); await execGit("add", [file_path]); changes_staged = true; }
+    catch (error) { core.error(`Failed to download or stage new file ${file_path}: ${(error as Error).message}`); }
   }
   // --- Handle Modified Files ---
   for (const { path: file_path, id } of modified_files) {
-    try {
-      core.info(`Downloading modified file from Drive: ${file_path} (ID: ${id})`);
-      await download_file(id, file_path);
-      await execGit("add", [file_path]);
-      changes_staged = true;
-    } catch (error) {
-      core.error(`Failed to download or stage modified file ${file_path}: ${(error as Error).message}`);
-    }
+    try { core.info(`Downloading modified file from Drive: ${file_path} (ID: ${id})`); await download_file(id, file_path); await execGit("add", [file_path]); changes_staged = true; }
+    catch (error) { core.error(`Failed to download or stage modified file ${file_path}: ${(error as Error).message}`); }
   }
-  // --- Handle Deleted Files (CONDITIONAL) ---
-  if (on_untrack_action === 'remove') {
-    core.info(`Processing ${deleted_files.length} files potentially deleted in Drive (on_untrack is 'remove').`);
-    for (const file_path of deleted_files) {
-      try {
-        core.info(`Removing local file deleted in Drive: ${file_path}`);
-        await execGit("rm", ["--ignore-unmatch", file_path]);
-        changes_staged = true;
-        files_actually_removed.push(file_path); // Add to list for commit message
-      } catch (error) {
-        core.error(`Failed to stage deletion of ${file_path}: ${(error as Error).message}`);
-      }
-    }
-  } else {
+
+  // --- Handle Deleted Files (CONDITIONAL based on TRIGGER and CONFIG) ---
+  if (trigger_event_name === 'push') {
+    // On push, NEVER remove local files just because they aren't in Drive yet.
     if (deleted_files.length > 0) {
-      core.info(`Found ${deleted_files.length} file(s) present locally but not in Drive. Skipping removal from Git because 'on_untrack' is '${on_untrack_action}'.`);
-      deleted_files.forEach(fp => core.info(`  - Skipped removal: ${fp}`));
+      core.info(`Found ${deleted_files.length} file(s) present locally but not in Drive. Skipping removal from Git because trigger was 'push'.`);
+      deleted_files.forEach(fp => core.info(`  - Skipped removal (push event): ${fp}`));
+    }
+  } else { // trigger_event_name is 'schedule', 'workflow_dispatch', etc.
+    // For schedule/manual triggers, respect the on_untrack setting
+    if (on_untrack_action === 'remove') {
+      core.info(`Processing ${deleted_files.length} files potentially deleted in Drive (trigger: ${trigger_event_name}, on_untrack: 'remove').`);
+      for (const file_path of deleted_files) {
+        try {
+          core.info(`Removing local file deleted in Drive: ${file_path}`);
+          await execGit("rm", ["--ignore-unmatch", file_path]);
+          changes_staged = true;
+          files_actually_removed.push(file_path);
+        } catch (error) {
+          core.error(`Failed to stage deletion of ${file_path}: ${(error as Error).message}`);
+        }
+      }
+    } else {
+      // Log if files were detected as deleted but action is not 'remove' on schedule/manual
+      if (deleted_files.length > 0) {
+        core.info(`Found ${deleted_files.length} file(s) present locally but not in Drive. Skipping removal from Git because 'on_untrack' is '${on_untrack_action}' (trigger: ${trigger_event_name}).`);
+        deleted_files.forEach(fp => core.info(`  - Skipped removal (config): ${fp}`));
+      }
     }
   }
 
@@ -780,9 +780,7 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
     const commit_messages: string[] = ["Sync changes from Google Drive"];
     if (new_files.length > 0) commit_messages.push(`- Added: ${new_files.map(f => f.path).join(", ")}`);
     if (modified_files.length > 0) commit_messages.push(`- Updated: ${modified_files.map(f => f.path).join(", ")}`);
-    if (files_actually_removed.length > 0) { // Use the actual list
-      commit_messages.push(`- Removed: ${files_actually_removed.join(", ")}`);
-    }
+    if (files_actually_removed.length > 0) commit_messages.push(`- Removed: ${files_actually_removed.join(", ")}`);
     commit_messages.push(`\nSource Drive Folder ID: ${folder_id}`);
 
     try {
@@ -798,11 +796,10 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
 
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
       const pr_title = `Sync changes from Google Drive (${folder_id})`;
-      // Update PR body generation to use files_actually_removed
       const pr_body = `This PR syncs changes detected in Google Drive folder [${folder_id}](https://drive.google.com/drive/folders/${folder_id}):\n` +
         (new_files.length > 0 ? `*   **Added:** ${new_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") +
         (modified_files.length > 0 ? `*   **Updated:** ${modified_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") +
-        (files_actually_removed.length > 0 ? `*   **Removed:** ${files_actually_removed.map(f => `\`${f}\``).join(", ")}\n` : "") + // Use files_actually_removed
+        (files_actually_removed.length > 0 ? `*   **Removed:** ${files_actually_removed.map(f => `\`${f}\``).join(", ")}\n` : "") + // Use actual removed files
         `\n*Workflow Run ID: ${run_id}*`;
 
       const pr_params = { owner, repo, title: pr_title, head: head_branch, base: initial_branch, body: pr_body };
@@ -813,7 +810,7 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
       core.setFailed(`Failed during commit, push, or PR creation for Drive changes: ${(error as Error).message}`);
     }
   } else {
-    core.info("No effective changes detected originating from Drive to ADD, UPDATE, or REMOVE (based on config). No PR needed.");
+    core.info("No effective changes detected originating from Drive to ADD, UPDATE, or REMOVE (based on config/trigger). No PR needed.");
   }
 
   // *** 7. Cleanup: Go back to the original branch and delete the temporary state branch ***
@@ -823,7 +820,7 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
     core.info(`Deleting temporary state branch '${original_state_branch}'`);
     await execGit("branch", ["-D", original_state_branch]);
   } catch (checkoutError) {
-    core.warning(`Failed to checkout initial branch '${initial_branch}' or delete temporary branch '${original_state_branch}'. Manual cleanup might be needed. Error: ${(checkoutError as Error).message}`);
+    core.warning(`Failed to checkout initial branch '${initial_branch}' or delete temp branch '${original_state_branch}'. Manual cleanup may be needed. Error: ${(checkoutError as Error).message}`);
     try {
       core.warning("Attempting checkout of 'main'");
       await execGit("checkout", ["main"]);
@@ -835,66 +832,52 @@ async function handle_drive_changes(folder_id: string, on_untrack_action: "ignor
   }
 }
 
-
 // *** Main sync function *** - UPDATED
 async function sync_to_drive() {
   const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
   core.info(`Syncing repository: ${owner}/${repo}`);
+  core.info(`Triggered by event: ${trigger_event_name}`); // Log the trigger
 
-  // Initial local file listing is still useful for the first outgoing sync pass
+  // Initial local file listing (still useful)
   const initial_local_files = await list_local_files(".");
-  if (initial_local_files.length === 0) {
-    core.warning("No relevant local files found to sync based on ignore rules. Nothing to push to Drive.");
-  } else {
-    core.info(`Found ${initial_local_files.length} initial local files for potential sync.`);
-  }
+  if (initial_local_files.length === 0) { core.warning("No relevant local files found to sync based on ignore rules."); }
+  else { core.info(`Found ${initial_local_files.length} initial local files for potential sync.`); }
 
   for (const target of config.targets.forks) {
     const folder_id = target.drive_folder_id;
-    const on_untrack_action = target.on_untrack || "ignore"; // Default to ignore
+    const on_untrack_action = target.on_untrack || "ignore";
     core.startGroup(`Processing Target Drive Folder: ${folder_id} (Untrack Action: ${on_untrack_action})`);
     core.info(`Drive URL: ${target.drive_url || `https://drive.google.com/drive/folders/${folder_id}`}`);
 
     try {
-      // *** NEW ORDER STEP 1: Sync Outgoing Changes (Local -> Drive) FIRST ***
+      // *** STEP 1: Sync Outgoing Changes (Local -> Drive) FIRST ***
       core.info("Step 1: Processing outgoing changes (local -> Drive)...");
       const current_local_files = await list_local_files(".");
       const current_local_map = new Map(current_local_files.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
       core.info(`Found ${current_local_map.size} local files for outgoing sync.`);
-
       core.info("Listing Drive content for outgoing sync comparison...");
       let drive_files_map_outgoing: Map<string, DriveItem>;
       let drive_folders_map_outgoing: Map<string, DriveItem>;
-      try {
+      try { /* List Drive files/folders */
         const drive_data_outgoing = await list_drive_files_recursively(folder_id);
         drive_files_map_outgoing = new Map(Array.from(drive_data_outgoing.files.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
         drive_folders_map_outgoing = new Map(Array.from(drive_data_outgoing.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
-        core.info(`Found ${drive_files_map_outgoing.size} files and ${drive_folders_map_outgoing.size} folders in Drive for outgoing sync.`);
-      } catch (listError) {
-        core.error(`Failed to list Drive content before outgoing sync for folder ${folder_id}: ${(listError as Error).message}. Skipping outgoing sync for this target.`);
-        drive_files_map_outgoing = new Map();
-        drive_folders_map_outgoing = new Map();
+        core.info(`Found ${drive_files_map_outgoing.size} files and ${drive_folders_map_outgoing.size} folders in Drive.`);
+      } catch (listError) { /* Handle error */
+        core.error(`Failed list Drive content before outgoing sync: ${(listError as Error).message}. Skipping outgoing sync.`);
+        drive_files_map_outgoing = new Map(); drive_folders_map_outgoing = new Map();
       }
-
       core.info("Ensuring Drive folder structure matches local structure...");
       let folder_path_to_id_map: Map<string, string>;
-      if (current_local_map.size > 0 && drive_folders_map_outgoing) {
-        try {
-          folder_path_to_id_map = await build_folder_structure(folder_id, current_local_files, drive_folders_map_outgoing);
-        } catch (structureError) {
-          core.error(`Failed to build Drive folder structure for ${folder_id}: ${(structureError as Error).message}. Skipping upload/update part of outgoing sync.`);
-          folder_path_to_id_map = new Map();
-        }
-      } else {
-        folder_path_to_id_map = new Map();
-        folder_path_to_id_map.set("", folder_id);
-        core.info("Skipping folder structure build (no local files or Drive folder listing failed).")
+      if (current_local_map.size > 0 && drive_folders_map_outgoing) { /* Build structure */
+        try { folder_path_to_id_map = await build_folder_structure(folder_id, current_local_files, drive_folders_map_outgoing); }
+        catch (structureError) { core.error(`Failed build Drive folder structure: ${(structureError as Error).message}. Skipping upload/update.`); folder_path_to_id_map = new Map(); }
+      } else { /* Handle no local files or failed list */
+        folder_path_to_id_map = new Map(); folder_path_to_id_map.set("", folder_id); core.info("Skipping folder structure build (no local files or Drive folder listing failed).");
       }
-
       core.info("Uploading/updating files from local to Drive...");
       const files_synced_to_drive = new Set<string>();
-
-      if (folder_path_to_id_map.size > 0) {
+      if (folder_path_to_id_map.size > 0) { /* Upload/Update loop */
         for (const [relative_path, local_file] of current_local_map) {
           files_synced_to_drive.add(relative_path);
           const drive_file = drive_files_map_outgoing.get(relative_path);
@@ -902,93 +885,54 @@ async function sync_to_drive() {
           const dir_path = path.dirname(relative_path);
           const parent_dir_lookup = (dir_path === '.') ? "" : dir_path.replace(/\\/g, '/');
           const target_folder_id = folder_path_to_id_map.get(parent_dir_lookup);
-
-          if (!target_folder_id) {
-            core.warning(`Could not find target folder ID for local file '${relative_path}' (parent path '${parent_dir_lookup}'). Skipping upload.`);
-            continue;
-          }
-
-          if (!drive_file) {
-            core.info(`New file in Git Repo, uploading to Drive: ${relative_path}`);
-            await upload_file(local_file.path, target_folder_id);
-          } else {
-            if (drive_file.hash && drive_file.hash !== local_file.hash) {
-              core.info(`Local file changed, updating Drive: ${relative_path} (Local: ${local_file.hash}, Drive: ${drive_file.hash})`);
-              await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
-            } else if (!drive_file.hash && drive_file.mimeType && !drive_file.mimeType.startsWith('application/vnd.google-apps')) {
-              core.info(`Local file exists, Drive hash missing. Attempting update: ${relative_path}`);
-              await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name });
-            }
+          if (!target_folder_id) { core.warning(`Could not find target folder ID for local file '${relative_path}'. Skipping upload.`); continue; }
+          // --- Upload/Update Logic ---
+          if (!drive_file) { await upload_file(local_file.path, target_folder_id); }
+          else { /* Update logic */
+            if (drive_file.hash && drive_file.hash !== local_file.hash) { await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name }); }
+            else if (!drive_file.hash && drive_file.mimeType && !drive_file.mimeType.startsWith('application/vnd.google-apps')) { await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name }); }
             const hashes_match_or_drive_missing = !drive_file.hash || (local_file.hash === drive_file.hash);
-            if (drive_file.name !== file_name && hashes_match_or_drive_missing) {
-              core.info(`Updating filename in Drive for ${relative_path} from '${drive_file.name}' to '${file_name}'`);
-              try {
-                await drive.files.update({ fileId: drive_file.id, requestBody: { name: file_name } });
-              } catch (renameError) {
-                core.warning(`Failed to rename file ${drive_file.id} to '${file_name}': ${(renameError as Error).message}`);
-              }
-            }
+            if (drive_file.name !== file_name && hashes_match_or_drive_missing) { try { await drive.files.update({ fileId: drive_file.id, requestBody: { name: file_name } }); } catch (renameError) { core.warning(`Failed rename file ${drive_file.id}: ${(renameError as Error).message}`); } }
           }
         }
-      } else {
-        core.info("Skipping upload/update phase due to issues in previous steps (folder listing/structure).");
-      }
+      } else { core.info("Skipping upload/update phase due to issues in previous steps."); }
 
-      // *** NEW ORDER STEP 2: Handle Untracked Files/Folders in Drive ***
+      // *** STEP 2: Handle Untracked Files/Folders in Drive ***
       core.info("Step 2: Handling untracked items in Drive...");
-      const untracked_drive_files = Array.from(drive_files_map_outgoing.entries())
-        .filter(([path, _item]) => !files_synced_to_drive.has(path));
-      const untracked_drive_folders = Array.from(drive_folders_map_outgoing.entries())
-        .filter(([path, _item]) => !Array.from(files_synced_to_drive).some(localPath => localPath.startsWith(path + '/')));
-      core.info(`Found ${untracked_drive_files.length} untracked files and ${untracked_drive_folders.length} potentially untracked folders in Drive.`);
-      const all_untracked_items = [
-        ...untracked_drive_files.map(([path, item]) => ({ path, item, isFolder: false })),
-        ...untracked_drive_folders.map(([path, item]) => ({ path, item, isFolder: true }))
-      ];
-      if (all_untracked_items.length > 0) {
-        if (on_untrack_action === "ignore") {
-          core.info(`Ignoring ${all_untracked_items.length} untracked item(s) in Drive as per config.`);
-        } else {
+      const untracked_drive_files = Array.from(drive_files_map_outgoing.entries()).filter(([p]) => !files_synced_to_drive.has(p));
+      const untracked_drive_folders = Array.from(drive_folders_map_outgoing.entries()).filter(([p]) => !Array.from(files_synced_to_drive).some(lp => lp.startsWith(p + '/')));
+      core.info(`Found ${untracked_drive_files.length} untracked files and ${untracked_drive_folders.length} potentially untracked folders.`);
+      const all_untracked_items = [ /* Combine files and folders */ ...untracked_drive_files.map(([p, i]) => ({ path: p, item: i, isFolder: false })), ...untracked_drive_folders.map(([p, i]) => ({ path: p, item: i, isFolder: true }))];
+      if (all_untracked_items.length > 0) { /* Untracked logic */
+        if (on_untrack_action === "ignore") { core.info(`Ignoring ${all_untracked_items.length} untracked item(s) in Drive as per config.`); }
+        else { /* Process remove/request */
           for (const { path: untracked_path, item: untracked_item, isFolder } of all_untracked_items) {
             core.info(`Processing untracked ${isFolder ? 'folder' : 'file'} in Drive: ${untracked_path} (ID: ${untracked_item.id})`);
-            if (!untracked_item.owned) {
+            if (!untracked_item.owned) { /* Handle not owned */
               const current_owner = untracked_item.permissions?.find(p => p.role === 'owner')?.emailAddress;
-              if (current_owner && current_owner !== credentials_json.client_email) {
-                core.warning(`Untracked item '${untracked_path}' is owned by ${current_owner}. Requesting ownership transfer.`);
-                await request_ownership_transfer(untracked_item.id, current_owner);
-                continue;
-              } else {
-                const ownerEmailsFromPermissions = untracked_item.permissions?.filter(p => p.role === 'owner').map(p => p.emailAddress || 'Unknown Email').join(',') || 'None found in permissions';
-                core.warning(`Untracked item '${untracked_path}' has unclear ownership (Owners: ${ownerEmailsFromPermissions}, Permissions: ${JSON.stringify(untracked_item.permissions)}).`);
-                if (on_untrack_action === 'remove') {
-                  core.warning(`Skipping removal of '${untracked_path}' due to unclear ownership.`);
-                  continue;
-                }
+              if (current_owner && current_owner !== credentials_json.client_email) { await request_ownership_transfer(untracked_item.id, current_owner); continue; }
+              else { /* Unclear owner */
+                const ownerEmails = untracked_item.permissions?.filter(p => p.role === 'owner').map(p => p.emailAddress || 'Unknown').join(',') || 'None';
+                core.warning(`Untracked '${untracked_path}' has unclear ownership (Owners: ${ownerEmails}).`);
+                if (on_untrack_action === 'remove') { core.warning(`Skipping removal '${untracked_path}' due to unclear ownership.`); continue; }
               }
-            } else {
+            } else { /* Handle owned */
               core.info(`Untracked item '${untracked_path}' is owned by the service account.`);
-              if (on_untrack_action === "remove") {
-                core.info(`Proceeding with removal (moving to trash) of owned untracked item '${untracked_path}'.`);
-                await delete_untracked(untracked_item.id, untracked_path, isFolder);
-              } else if (on_untrack_action === "request") {
-                core.info(`Untracked item '${untracked_path}' is already owned. No action needed for 'request' strategy.`);
-              }
+              if (on_untrack_action === "remove") { await delete_untracked(untracked_item.id, untracked_path, isFolder); }
+              else if (on_untrack_action === "request") { core.info(`Untracked '${untracked_path}' already owned. No action needed.`); }
             }
           }
         }
-      } else {
-        core.info("No untracked items found in Drive for this target.");
-      }
+      } else { core.info("No untracked items found in Drive for this target."); }
 
-      // *** NEW ORDER STEP 3: Accept Pending Ownership Transfers ***
+      // *** STEP 3: Accept Pending Ownership Transfers ***
       core.info("Step 3: Checking for and accepting pending ownership transfers...");
       await accept_ownership_transfers(folder_id);
 
-      // *** NEW ORDER STEP 4: Handle Incoming Changes from Drive (Drive -> Local PR) ***
+      // *** STEP 4: Handle Incoming Changes from Drive (Drive -> Local PR) ***
       core.info("Step 4: Handling potential incoming changes from Drive (Drive -> Local PR)...");
-      // Pass the on_untrack_action to handle_drive_changes
-      await handle_drive_changes(folder_id, on_untrack_action); // <-- Pass the action
-
+      // Pass the trigger event name and on_untrack config down
+      await handle_drive_changes(folder_id, on_untrack_action, trigger_event_name);
 
     } catch (error) {
       core.error(`Unhandled error during sync process for Drive folder ${folder_id}: ${(error as Error).message}`);
@@ -1001,7 +945,6 @@ async function sync_to_drive() {
   }
   core.info("All sync targets processed.");
 }
-
 
 // Run the action
 sync_to_drive().catch((error: unknown) => {
