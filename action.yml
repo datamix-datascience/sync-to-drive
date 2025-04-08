@@ -4,6 +4,10 @@ inputs:
   credentials:
     description: "Base64-encoded Google Service Account JSON"
     required: true
+  github_token:
+    description: "GitHub token for API calls (e.g., creating PRs)"
+    required: true
+    default: ${{ github.token }}
 runs:
   using: "node20"
   main: "dist/sync_to_drive.js"

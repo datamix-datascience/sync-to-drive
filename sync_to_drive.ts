@@ -92,12 +92,8 @@ const auth = new google.auth.JWT(
 const drive = google.drive({ version: "v3", auth });
 
 // GitHub API setup
-const github_token = process.env.GITHUB_TOKEN;
-if (!github_token) {
-  core.setFailed("GITHUB_TOKEN environment variable is not set.");
-  process.exit(1);
-}
-const octokit = new Octokit({ auth: github_token });
+const github_token_input = core.getInput('github_token', { required: true })
+const octokit = new Octokit({ auth: github_token_input });
 
 
 // Track ownership transfer requests
