@@ -80,6 +80,7 @@ interface GoogleDocsExport {
   hash: string;
   doc_id: string;
   last_modified: string;
+  gdoc_path: string; // Add path for .gdoc file
 }
 
 // Load config
@@ -878,9 +879,20 @@ async function export_google_doc(doc_id: string): Promise<string> {
   }
 }
 
+// .gdocファイルの内容を生成する関数
+function create_gdoc_content(doc_id: string): string {
+  const gdoc_content = {
+    url: `https://docs.google.com/document/d/${doc_id}/edit`,
+    doc_id: doc_id,
+    resource_id: `document:${doc_id}`,
+    api_resource_id: `document:${doc_id}`,
+  };
+  return JSON.stringify(gdoc_content, null, 2);
+}
+
 // HTMLコンテンツのハッシュを計算
-function compute_html_hash(html_content: string): string {
-  return createHash("md5").update(html_content).digest("hex");
+function compute_html_hash(content: string): string {
+  return createHash("md5").update(content).digest("hex");
 }
 
 // Google Docsの変更を検出する関数
@@ -898,19 +910,22 @@ async function check_google_docs_changes(
       try {
         const html_content = await export_google_doc(item.id);
         const html_hash = compute_html_hash(html_content);
-        const local_path = path.replace(/\.gdoc$/, ".html");
+        const base_path = path.replace(/\.gdoc$/, "");
+        const html_path = `${base_path}.html`;
+        const gdoc_path = `${base_path}.gdoc`;
 
         const doc_export: GoogleDocsExport = {
-          path: local_path,
+          path: html_path,
+          gdoc_path: gdoc_path,
           html_content,
           hash: html_hash,
           doc_id: item.id,
           last_modified: item.lastModified || new Date().toISOString(),
         };
 
-        // ローカルのHTMLファイルが存在するか確認
-        if (fs.existsSync(local_path)) {
-          const local_content = await fs_promises.readFile(local_path, "utf-8");
+        // HTMLファイルが存在するか確認
+        if (fs.existsSync(html_path)) {
+          const local_content = await fs_promises.readFile(html_path, "utf-8");
           const local_hash = compute_html_hash(local_content);
 
           if (local_hash !== html_hash) {
@@ -1091,14 +1106,22 @@ async function handle_drive_changes(
   // Handle new Google Docs
   for (const doc of new_docs) {
     try {
-      core.info(`Creating new HTML from Google Doc: ${doc.path}`);
+      core.info(
+        `Creating new HTML and .gdoc files from Google Doc: ${doc.path}`
+      );
       await fs_promises.writeFile(doc.path, doc.html_content, "utf-8");
-      await execGit("add", [doc.path]);
+      await fs_promises.writeFile(
+        doc.gdoc_path,
+        create_gdoc_content(doc.doc_id),
+        "utf-8"
+      );
+      await execGit("add", [doc.path, doc.gdoc_path]);
       changes_staged = true;
       new_files.push({ path: doc.path, id: doc.doc_id });
+      new_files.push({ path: doc.gdoc_path, id: doc.doc_id });
     } catch (error) {
       core.error(
-        `Failed to create HTML for Google Doc ${doc.path}: ${
+        `Failed to create files for Google Doc ${doc.path}: ${
           (error as Error).message
         }`
       );
@@ -1108,9 +1131,14 @@ async function handle_drive_changes(
   // Handle modified Google Docs
   for (const doc of modified_docs) {
     try {
-      core.info(`Updating HTML from Google Doc: ${doc.path}`);
+      core.info(`Updating HTML and .gdoc files from Google Doc: ${doc.path}`);
       await fs_promises.writeFile(doc.path, doc.html_content, "utf-8");
-      await execGit("add", [doc.path]);
+      await fs_promises.writeFile(
+        doc.gdoc_path,
+        create_gdoc_content(doc.doc_id),
+        "utf-8"
+      );
+      await execGit("add", [doc.path, doc.gdoc_path]);
       changes_staged = true;
       modified_files.push({
         path: doc.path,
@@ -1118,9 +1146,15 @@ async function handle_drive_changes(
         local_hash: doc.hash,
         drive_hash: doc.hash,
       });
+      modified_files.push({
+        path: doc.gdoc_path,
+        id: doc.doc_id,
+        local_hash: doc.hash,
+        drive_hash: doc.hash,
+      });
     } catch (error) {
       core.error(
-        `Failed to update HTML for Google Doc ${doc.path}: ${
+        `Failed to update files for Google Doc ${doc.path}: ${
           (error as Error).message
         }`
       );
