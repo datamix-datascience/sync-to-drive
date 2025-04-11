@@ -435,19 +435,36 @@ const GOOGLE_DOC_MIME_TYPES = [
   "application/vnd.google-apps.map"
 ];
 
+const MIME_TYPE_TO_EXTENSION: { [mimeType: string]: string } = {
+  "application/vnd.google-apps.document": "document",
+  "application/vnd.google-apps.spreadsheet": "sheet",
+  "application/vnd.google-apps.presentation": "presentation",
+  "application/vnd.google-apps.form": "form",
+  "application/vnd.google-apps.drawing": "drawing",
+  "application/vnd.google-apps.script": "script",
+  "application/vnd.google-apps.fusiontable": "fusiontable",
+  "application/vnd.google-apps.site": "site",
+  "application/vnd.google-apps.map": "map"
+};
 
 async function create_google_doc_shortcut_file(drive_item: DriveItem, local_path: string): Promise<void> {
   const file_name = path.basename(local_path);
   const file_extension = path.extname(local_path);
   const base_name = path.basename(local_path, file_extension);
-  const shortcut_file_content = `[Google Drive Shortcut]
-Type: ${drive_item.mimeType}
-Drive URL: https://drive.google.com/drive/d/${drive_item.id}/view?usp=sharing
-Drive File ID: ${drive_item.id}
-MIME Type: ${drive_item.mimeType}
-This file is a shortcut to a Google Drive document. To view or edit the document, open the Drive URL in a web browser.
-`;
-  const shortcut_file_path = local_path + ".url.txt"; // Use .url.txt extension to indicate shortcut
+
+  const shortcut_data = {
+    type: drive_item.mimeType,
+    drive_url: `https://drive.google.com/drive/d/${drive_item.id}/view?usp=sharing`,
+    drive_file_id: drive_item.id,
+    mime_type: drive_item.mimeType,
+    description: "This file is a shortcut to a Google Drive document. To view or edit the document, open the Drive URL in a web browser."
+  };
+  const shortcut_file_content = JSON.stringify(shortcut_data, null, 2);
+
+  const type_extension = MIME_TYPE_TO_EXTENSION[drive_item.mimeType!] || 'googledoc';
+  const shortcut_file_name = `${base_name}.${type_extension}.json.txt`;
+  const shortcut_file_path = path.join(path.dirname(local_path), shortcut_file_name);
+
 
   core.info(`Creating Google Doc shortcut file: ${shortcut_file_path} for '${file_name}' (Drive ID: ${drive_item.id})`);
   await fs_promises.writeFile(shortcut_file_path, shortcut_file_content, { encoding: 'utf-8' });
@@ -715,7 +732,7 @@ async function create_pull_request_with_retry(
 async function handle_drive_changes(
   folder_id: string,
   on_untrack_action: "ignore" | "remove" | "request",
-  trigger_event_name: string // <-- Added parameter
+  trigger_event_name: string
 ) {
   core.info(`Handling potential incoming changes from Drive folder: ${folder_id} (Trigger: ${trigger_event_name}, Untrack action: ${on_untrack_action})`);
 
@@ -758,30 +775,52 @@ async function handle_drive_changes(
   // *** 3. Compare Drive state to local state (Case-Insensitive Lookup) ***
   for (const [drive_path, drive_item] of drive_files) {
     const drive_path_lower = drive_path.toLowerCase();
+    // Construct potential shortcut filename for lookup
+    const type_extension = drive_item.mimeType ? MIME_TYPE_TO_EXTENSION[drive_item.mimeType] || 'googledoc' : 'googledoc';
+    const shortcut_filename_lower = `${path.dirname(drive_path)}/${path.basename(drive_path)}.${type_extension}.json.txt`.toLowerCase();
+    // Check both original path and potential shortcut path in local map
     const original_local_key = local_lower_to_original_key.get(drive_path_lower);
-    const local_file = original_local_key ? local_map.get(original_local_key) : undefined;
-    core.debug(`Comparing Drive path: '${drive_path}', Lowercase: '${drive_path_lower}'`);
-    if (!local_file || !original_local_key) {
-      core.debug(`   Local file NOT FOUND for Drive path: '${drive_path}'`);
+    const shortcut_local_key = local_lower_to_original_key.get(shortcut_filename_lower);
+    const local_file_info = original_local_key ? local_map.get(original_local_key) : (shortcut_local_key ? local_map.get(shortcut_local_key) : undefined);
+    const actual_local_key = original_local_key || shortcut_local_key;
+
+    core.debug(`Comparing Drive path: '${drive_path}', Lowercase: '${drive_path_lower}', Shortcut Lower: '${shortcut_filename_lower}'`);
+
+    if (!local_file_info || !actual_local_key) {
+      core.debug(`   Local file NOT FOUND for Drive path: '${drive_path}' (checked original and shortcut names)`);
       core.info(`New file detected in Drive: ${drive_path} (ID: ${drive_item.id})`);
       new_files.push({ path: drive_path, id: drive_item.id, mimeType: drive_item.mimeType });
     } else {
-      core.debug(`   Found matching local key (case-insensitive): '${original_local_key}'`);
-      found_local_keys.add(original_local_key);
-      if (drive_item.hash && local_file.hash !== drive_item.hash) {
+      core.debug(`   Found matching local key (case-insensitive): '${actual_local_key}'`);
+      found_local_keys.add(actual_local_key); // Add the key that was actually found
+      if (GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "")) {
+        // For Google Docs, we don't compare hash, just existence. Treat as modified if filename format changed.
+        if (actual_local_key !== shortcut_filename_lower.replace(drive_path_lower, drive_path)) { // Compare actual key with expected new format
+          core.info(`Shortcut filename format changed for Google Doc: ${drive_path}. Updating local representation.`);
+          modified_files.push({ path: drive_path, id: drive_item.id, local_hash: '', drive_hash: '', mimeType: drive_item.mimeType });
+        } else {
+          core.debug(`Google Doc '${drive_path}' found locally with correct shortcut name. No modification needed.`);
+        }
+      } else if (drive_item.hash && local_file_info.hash !== drive_item.hash) {
         core.info(`Modified file detected in Drive (hash mismatch): ${drive_path}`);
-        core.info(` -> Local hash: ${local_file.hash}, Drive hash: ${drive_item.hash}`);
-        modified_files.push({ path: drive_path, id: drive_item.id, local_hash: local_file.hash, drive_hash: drive_item.hash, mimeType: drive_item.mimeType });
+        core.info(` -> Local hash: ${local_file_info.hash}, Drive hash: ${drive_item.hash}`);
+        modified_files.push({ path: drive_path, id: drive_item.id, local_hash: local_file_info.hash, drive_hash: drive_item.hash, mimeType: drive_item.mimeType });
       } else if (!drive_item.hash && drive_item.mimeType && !drive_item.mimeType.startsWith('application/vnd.google-apps')) {
-        core.warning(`Drive file ${drive_path} exists locally but has no md5Checksum. Cannot verify modification. Skipping update from Drive.`);
-      } else { core.debug(`File '${drive_path}' found locally and hashes match or is Google Doc. No modification needed.`); }
+        // This case might indicate a non-Google Doc file without a hash. Consider it modified.
+        core.warning(`Drive file ${drive_path} has no md5Checksum. Treating as modified to ensure latest version.`);
+        modified_files.push({ path: drive_path, id: drive_item.id, local_hash: local_file_info.hash, drive_hash: drive_item.hash, mimeType: drive_item.mimeType });
+      } else {
+        core.debug(`File '${drive_path}' found locally and hashes match. No modification needed.`);
+      }
     }
   }
+
 
   // *** 4. Identify files deleted in Drive ***
   core.debug("Checking for files deleted in Drive...");
   for (const [local_key, _local_file_info] of local_map) {
     if (!found_local_keys.has(local_key)) {
+      // If the local key wasn't found during the Drive scan, it's deleted in Drive
       core.info(`File deleted in Drive detected (was in local state, not found in Drive): ${local_key}`);
       deleted_files.push(local_key);
     }
@@ -791,82 +830,92 @@ async function handle_drive_changes(
   // *** 5. Apply changes locally and stage them ***
   let changes_staged = false;
   let files_actually_removed: string[] = []; // Track files actually removed for commit msg
+  let added_or_updated_paths_for_commit: string[] = []; // Track final paths added/updated
+
+  // --- Handle File Deletions FIRST (to handle renames/format changes correctly) ---
+  if (trigger_event_name !== 'push' && on_untrack_action === 'remove') {
+    core.info(`Processing ${deleted_files.length} files potentially deleted in Drive (trigger: ${trigger_event_name}, on_untrack: 'remove').`);
+    for (const file_path of deleted_files) {
+      try {
+        // Just try removing the path found locally. git rm handles both files and old/new shortcuts.
+        core.info(`Removing local file/shortcut deleted or renamed in Drive: ${file_path}`);
+        await execute_git("rm", ["--ignore-unmatch", file_path]);
+        // Don't set changes_staged yet, removal alone doesn't trigger PR if it was just a rename.
+        files_actually_removed.push(file_path); // Keep track for potential commit message
+      } catch (error) {
+        core.error(`Failed to stage deletion of ${file_path}: ${(error as Error).message}`);
+      }
+    }
+  } else if (deleted_files.length > 0) {
+    const reason = trigger_event_name === 'push' ? `trigger was 'push'` : `'on_untrack' is '${on_untrack_action}'`;
+    core.info(`Found ${deleted_files.length} file(s) present locally but not in Drive. Skipping removal from Git because ${reason}.`);
+    deleted_files.forEach(fp => core.info(`  - Skipped removal: ${fp}`));
+  }
 
   // --- Handle New Files ---
-  core.debug(`Applying changes: ${new_files.length} new, ${modified_files.length} modified, ${deleted_files.length} potentially deleted.`);
+  core.debug(`Applying changes: ${new_files.length} new, ${modified_files.length} modified.`);
   for (const { path: file_path, id, mimeType } of new_files) {
     try {
-      const local_file_path = file_path; // keep original path
-      core.info(`Downloading new file from Drive: ${file_path} (ID: ${id})`);
-      await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path); // Use handle_download_item
-      await execute_git("add", [local_file_path + (GOOGLE_DOC_MIME_TYPES.includes(mimeType || "") ? ".url.txt" : "")]); // Add shortcut file if created
+      const local_file_path_base = file_path; // Keep original path base for download/shortcut creation
+      const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(mimeType || "");
+      const final_local_path = is_google_doc
+        ? `${local_file_path_base}.${MIME_TYPE_TO_EXTENSION[mimeType!] || 'googledoc'}.json.txt`
+        : local_file_path_base;
+
+      core.info(`Handling new file from Drive: ${file_path} (ID: ${id}) -> ${final_local_path}`);
+      // Download or create shortcut using the base path
+      await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path_base);
+      // Add the final path (potentially with new extension) to git
+      await execute_git("add", [final_local_path]);
+      added_or_updated_paths_for_commit.push(final_local_path);
       changes_staged = true;
     }
-    catch (error) { core.error(`Failed to download or stage new file ${file_path}: ${(error as Error).message}`); }
+    catch (error) { core.error(`Failed to process new file ${file_path}: ${(error as Error).message}`); }
   }
   // --- Handle Modified Files ---
   for (const { path: file_path, id, mimeType } of modified_files) {
     try {
-      const local_file_path = file_path; // keep original path
-      core.info(`Downloading modified file from Drive: ${file_path} (ID: ${id})`);
-      await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path); // Use handle_download_item
-      await execute_git("add", [local_file_path + (GOOGLE_DOC_MIME_TYPES.includes(mimeType || "") ? ".url.txt" : "")]); // Add shortcut file if created
+      const local_file_path_base = file_path; // Keep original path base
+      const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(mimeType || "");
+      const final_local_path = is_google_doc
+        ? `${local_file_path_base}.${MIME_TYPE_TO_EXTENSION[mimeType!] || 'googledoc'}.json.txt`
+        : local_file_path_base;
+
+      core.info(`Handling modified file from Drive: ${file_path} (ID: ${id}) -> ${final_local_path}`);
+      // Download or create shortcut using the base path
+      await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path_base);
+      // Add the final path (potentially with new extension) to git
+      await execute_git("add", [final_local_path]);
+      added_or_updated_paths_for_commit.push(final_local_path);
       changes_staged = true;
     }
-    catch (error) { core.error(`Failed to download or stage modified file ${file_path}: ${(error as Error).message}`); }
+    catch (error) { core.error(`Failed to process modified file ${file_path}: ${(error as Error).message}`); }
   }
 
-  // --- Handle Deleted Files (CONDITIONAL based on TRIGGER and CONFIG) ---
-  if (trigger_event_name === 'push') {
-    // On push, NEVER remove local files just because they aren't in Drive yet.
-    if (deleted_files.length > 0) {
-      core.info(`Found ${deleted_files.length} file(s) present locally but not in Drive. Skipping removal from Git because trigger was 'push'.`);
-      deleted_files.forEach(fp => core.info(`  - Skipped removal (push event): ${fp}`));
-    }
-  } else { // trigger_event_name is 'schedule', 'workflow_dispatch', etc.
-    // For schedule/manual triggers, respect the on_untrack setting
-    if (on_untrack_action === 'remove') {
-      core.info(`Processing ${deleted_files.length} files potentially deleted in Drive (trigger: ${trigger_event_name}, on_untrack: 'remove').`);
-      for (const file_path of deleted_files) {
-        try {
-          const shortcut_file_path = file_path + ".url.txt";
-          if (fs.existsSync(shortcut_file_path)) {
-            core.info(`Removing local shortcut file deleted in Drive: ${shortcut_file_path}`);
-            await execute_git("rm", ["--ignore-unmatch", shortcut_file_path]);
-          } else {
-            core.info(`Removing local file deleted in Drive: ${file_path}`);
-            await execute_git("rm", ["--ignore-unmatch", file_path]);
-          }
-          changes_staged = true;
-          files_actually_removed.push(file_path);
-        } catch (error) {
-          core.error(`Failed to stage deletion of ${file_path}: ${(error as Error).message}`);
-        }
-      }
-    } else {
-      // Log if files were detected as deleted but action is not 'remove' on schedule/manual
-      if (deleted_files.length > 0) {
-        core.info(`Found ${deleted_files.length} file(s) present locally but not in Drive. Skipping removal from Git because 'on_untrack' is '${on_untrack_action}' (trigger: ${trigger_event_name}).`);
-        deleted_files.forEach(fp => core.info(`  - Skipped removal (config): ${fp}`));
-      }
-    }
-  }
+
+  // Determine actual changes for commit message (exclude removals that were part of a rename/format change)
+  const final_added_paths = added_or_updated_paths_for_commit.filter(p => !local_map.has(p));
+  const final_updated_paths = added_or_updated_paths_for_commit.filter(p => local_map.has(p));
+  // Only include removed paths if they weren't immediately replaced by an add/update
+  const final_removed_paths = files_actually_removed.filter(p => !added_or_updated_paths_for_commit.includes(p));
+
 
   // *** 6. Commit, Push, and Create PR if changes were staged ***
   if (changes_staged) {
     const status_result = await execute_git('status', ['--porcelain']);
     if (!status_result.stdout.trim()) {
       core.info("Git status clean after applying changes. No commit needed for incoming changes.");
-      changes_staged = false;
+      changes_staged = false; // Reset flag if staging resulted in no changes
     }
   }
 
   if (changes_staged) {
     core.info("Changes detected originating from Drive. Proceeding with commit and PR.");
     const commit_messages: string[] = ["Sync changes from Google Drive"];
-    if (new_files.length > 0) commit_messages.push(`- Added: ${new_files.map(f => f.path + (GOOGLE_DOC_MIME_TYPES.includes(f.mimeType || "") ? ".url.txt" : "")).join(", ")}`);
-    if (modified_files.length > 0) commit_messages.push(`- Updated: ${modified_files.map(f => f.path + (GOOGLE_DOC_MIME_TYPES.includes(f.mimeType || "") ? ".url.txt" : "")).join(", ")}`);
-    if (files_actually_removed.length > 0) commit_messages.push(`- Removed: ${files_actually_removed.join(", ")}`);
+    // Use the filtered lists for commit message accuracy
+    if (final_added_paths.length > 0) commit_messages.push(`- Added: ${final_added_paths.join(", ")}`);
+    if (final_updated_paths.length > 0) commit_messages.push(`- Updated: ${final_updated_paths.join(", ")}`);
+    if (final_removed_paths.length > 0) commit_messages.push(`- Removed: ${final_removed_paths.join(", ")}`); // Use actual removed files
     commit_messages.push(`\nSource Drive Folder ID: ${folder_id}`);
 
     try {
@@ -874,23 +923,40 @@ async function handle_drive_changes(
       await execute_git("config", ["--local", "user.name", "github-actions[bot]"]);
       await execute_git("commit", ["-m", commit_messages.join("\n")]);
       const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const head_branch = `sync-from-drive-${sanitized_folder_id}-${run_id}`;
-      core.info(`Creating PR branch: ${head_branch}`);
-      await execute_git("checkout", ["-b", head_branch]);
+      // Use a consistent branch name based only on the folder ID for easier PR updating
+      const head_branch = `sync-from-drive-${sanitized_folder_id}`;
+      core.info(`Checking out or creating PR branch: ${head_branch}`);
+      // Checkout the branch; create if it doesn't exist from the temporary state branch's commit
+      // Fetch remote branches first to see if the sync branch already exists remotely
+      await execute_git("fetch", ["origin"]);
+      const remote_branch_exists = (await execute_git("branch", ["-r"], { silent: true })).stdout.includes(`origin/${head_branch}`);
+      if (remote_branch_exists) {
+        core.info(`Branch ${head_branch} exists remotely. Checking it out and resetting.`);
+        await execute_git("checkout", [head_branch]);
+        // Reset to the commit we just made on the temporary branch
+        const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim(); // Get hash of the *commit just made* before switching branch
+        await execute_git("reset", ["--hard", sync_commit_hash]); // Reset existing branch to the new state
+      } else {
+        core.info(`Branch ${head_branch} does not exist remotely. Creating it locally.`);
+        await execute_git("checkout", ["-b", head_branch]); // Create from current commit
+      }
+
       core.info(`Pushing branch ${head_branch} to origin...`);
       await execute_git("push", ["--force", "origin", head_branch]);
 
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
       const pr_title = `Sync changes from Google Drive (${folder_id})`;
+      // Use the filtered lists for PR body accuracy
       const pr_body = `This PR syncs changes detected in Google Drive folder [${folder_id}](https://drive.google.com/drive/folders/${folder_id}):\n` +
-        (new_files.length > 0 ? `*   **Added:** ${new_files.map(f => `\`${f.path + (GOOGLE_DOC_MIME_TYPES.includes(f.mimeType || "") ? ".url.txt" : "")}\``).join(", ")}\n` : "") +
-        (modified_files.length > 0 ? `*   **Updated:** ${modified_files.map(f => `\`${f.path + (GOOGLE_DOC_MIME_TYPES.includes(f.mimeType || "") ? ".url.txt" : "")}\``).join(", ")}\n` : "") +
-        (files_actually_removed.length > 0 ? `*   **Removed:** ${files_actually_removed.map(f => `\`${f}\``).join(", ")}\n` : "") + // Use actual removed files
+        (final_added_paths.length > 0 ? `*   **Added:** ${final_added_paths.map(p => `\`${p}\``).join(", ")}\n` : "") +
+        (final_updated_paths.length > 0 ? `*   **Updated:** ${final_updated_paths.map(p => `\`${p}\``).join(", ")}\n` : "") +
+        (final_removed_paths.length > 0 ? `*   **Removed:** ${final_removed_paths.map(p => `\`${p}\``).join(", ")}\n` : "") +
         `\n*Workflow Run ID: ${run_id}*`;
+
 
       const pr_params = { owner, repo, title: pr_title, head: head_branch, base: initial_branch, body: pr_body };
       await create_pull_request_with_retry(octokit, pr_params);
-      core.info(`Pull request creation initiated for branch ${head_branch}.`);
+      core.info(`Pull request create/update initiated for branch ${head_branch}.`);
 
     } catch (error) {
       core.setFailed(`Failed during commit, push, or PR creation for Drive changes: ${(error as Error).message}`);
@@ -902,19 +968,16 @@ async function handle_drive_changes(
   // *** 7. Cleanup: Go back to the original branch and delete the temporary state branch ***
   core.info(`Cleaning up temporary branches. Checking out initial branch '${initial_branch}'`);
   try {
-    await execute_git("checkout", [initial_branch]);
+    // Ensure we are not on the temporary branch before deleting
+    const current_cleanup_branch = (await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true })).stdout.trim();
+    if (current_cleanup_branch !== initial_branch) {
+      await execute_git("checkout", [initial_branch]);
+    }
     core.info(`Deleting temporary state branch '${original_state_branch}'`);
     await execute_git("branch", ["-D", original_state_branch]);
   } catch (checkoutError) {
-    core.warning(`Failed to checkout initial branch '${initial_branch}' or delete temp branch '${original_state_branch}'. Manual cleanup may be needed. Error: ${(checkoutError as Error).message}`);
-    try {
-      core.warning("Attempting checkout of 'main'");
-      await execute_git("checkout", ["main"]);
-      core.info(`Deleting temporary state branch '${original_state_branch}'`);
-      await execute_git("branch", ["-D", original_state_branch], { ignoreReturnCode: true });
-    } catch (mainCheckoutError) {
-      core.error("Could not checkout 'main' either. Workspace might be in an inconsistent state.");
-    }
+    core.warning(`Failed to cleanup branches. Manual cleanup may be needed. Error: ${(checkoutError as Error).message}`);
+    // Avoid trying to checkout main if initial branch checkout failed, could make things worse
   }
 }
 
