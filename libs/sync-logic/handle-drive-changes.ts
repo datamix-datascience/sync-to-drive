@@ -343,38 +343,45 @@ export async function handle_drive_changes(
       const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
       core.info(`Created sync commit ${sync_commit_hash} on temporary branch '${original_state_branch}'.`);
 
+      // --- Prepare PR Branch ---
       const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
       const head_branch = `sync-from-drive-${sanitized_folder_id}`;
       core.info(`Preparing PR branch: ${head_branch}`);
 
-      const show_branch_local = await execute_git('show-ref', ['--verify', `refs/heads/${head_branch}`], { ignoreReturnCode: true, silent: true });
-      const show_branch_remote = await execute_git('ls-remote', ['--exit-code', '--heads', 'origin', head_branch], { ignoreReturnCode: true, silent: true });
-      let branch_exists = show_branch_local.exitCode === 0 || show_branch_remote.exitCode === 0;
+      // Check existence of local and remote branch
+      const local_branch_exists_check = await execute_git('show-ref', ['--verify', `refs/heads/${head_branch}`], { ignoreReturnCode: true, silent: true });
+      const remote_branch_exists_check = await execute_git('ls-remote', ['--exit-code', '--heads', 'origin', head_branch], { ignoreReturnCode: true, silent: true });
+      const local_branch_exists = local_branch_exists_check.exitCode === 0;
+      const remote_branch_exists = remote_branch_exists_check.exitCode === 0;
 
-      if (!branch_exists) {
-        core.info(`Branch ${head_branch} does not exist locally or remotely. Creating it...`);
-        await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
-      } else {
-        const local_branch_exists = show_branch_local.exitCode === 0;
-        if (!local_branch_exists && show_branch_remote.exitCode === 0) {
-          core.info(`Branch ${head_branch} exists remotely. Creating local branch to track origin/${head_branch}...`);
-          // Fetch the remote branch first before creating the local tracking one
+      if (local_branch_exists) {
+        core.info(`Branch ${head_branch} exists locally. Checking it out...`);
+        await execute_git("checkout", [head_branch]);
+      } else if (remote_branch_exists) {
+        core.info(`Branch ${head_branch} exists remotely but not locally. Fetching and checking out...`);
+        try {
+          // Fetch the remote branch specifically into the local namespace with the same name
           await execute_git("fetch", ["origin", `${head_branch}:${head_branch}`]);
-          const checkout_track_result = await execute_git("checkout", ["-b", head_branch, `origin/${head_branch}`], { ignoreReturnCode: true });
-          if (checkout_track_result.exitCode !== 0) {
-            core.warning(`Failed checkout tracking branch ${head_branch} (Exit: ${checkout_track_result.exitCode}), creating from hash instead. Stderr: ${checkout_track_result.stderr}`);
-            await execute_git("checkout", ["-b", head_branch, sync_commit_hash]); // Fallback
-          }
-        } else if (!local_branch_exists) {
-          core.info(`Branch ${head_branch} does not exist locally (and maybe not remote). Creating it from hash...`);
-          await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
-        } else {
-          core.info(`Branch ${head_branch} exists locally. Checking it out...`);
+          // Now checkout the local branch that was just created/updated by fetch
           await execute_git("checkout", [head_branch]);
+        } catch (fetchCheckoutError) {
+          core.warning(`Failed to fetch/checkout remote branch ${head_branch}. Creating new local branch from commit hash as fallback. Error: ${(fetchCheckoutError as Error).message}`);
+          // Fallback: Create the branch purely locally from the hash if fetch/checkout failed
+          await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
         }
-        core.info(`Resetting branch ${head_branch} to sync commit ${sync_commit_hash}...`);
-        await execute_git("reset", ["--hard", sync_commit_hash]);
+      } else {
+        core.info(`Branch ${head_branch} does not exist locally or remotely. Creating it from commit hash...`);
+        await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
       }
+
+      // ** Critical Step: ** Ensure the checked-out branch points exactly to the new commit
+      core.info(`Resetting branch ${head_branch} to sync commit ${sync_commit_hash}...`);
+      await execute_git("reset", ["--hard", sync_commit_hash]); // DO NOT ignore return code here - reset must succeed
+
+
+      // --- Push and PR ---
+      core.info(`Pushing branch ${head_branch} to origin...`);
+      await execute_git("push", ["--force", "origin", head_branch]);
 
       core.info(`Pushing branch ${head_branch} to origin...`);
       await execute_git("push", ["--force", "origin", head_branch]);
