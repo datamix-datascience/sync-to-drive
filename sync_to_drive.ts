@@ -642,7 +642,7 @@ async function execute_git(command: string, args: string[], options: { ignoreRet
   }
 }
 
-// Create PR with Retry
+// Create PR with Retry - UPDATED to handle existing PRs
 async function create_pull_request_with_retry(
   octokit: Octokit,
   params: { owner: string; repo: string; title: string; head: string; base: string; body: string },
@@ -656,20 +656,45 @@ async function create_pull_request_with_retry(
       const base_branch = repo_info.data.default_branch;
       core.info(`Target repository default branch: ${base_branch}`);
       const head_ref = `${params.owner}:${params.head}`; // Use owner:branch format
-      core.info(`Attempt ${attempt + 1}: Creating PR: head=${head_ref} base=${base_branch}`);
-      await octokit.rest.pulls.create({
+
+      // Check if a PR already exists
+      core.info(`Checking for existing PR: head=${head_ref} base=${base_branch}`);
+      const existing_prs = await octokit.rest.pulls.list({
         owner: params.owner,
         repo: params.repo,
-        title: params.title,
-        head: head_ref, // Use explicit format
-        base: base_branch, // Use fetched default branch
-        body: params.body,
+        head: head_ref,
+        base: base_branch,
+        state: 'open', // Check for open PRs only
       });
-      core.info(`Pull request created successfully! (head: ${head_ref}, base: ${base_branch})`);
-      return;
+
+      if (existing_prs.data.length > 0) {
+        const existing_pr = existing_prs.data[0];
+        core.info(`Existing pull request found (ID: ${existing_pr.id}, Number: ${existing_pr.number}). Updating it.`);
+        await octokit.rest.pulls.update({
+          owner: params.owner,
+          repo: params.repo,
+          pull_number: existing_pr.number,
+          title: params.title,
+          body: params.body,
+        });
+        core.info(`Pull request updated successfully! (ID: ${existing_pr.id}, Number: ${existing_pr.number})`);
+        return;
+      } else {
+        core.info(`No existing pull request found. Creating new PR: head=${head_ref} base=${base_branch}`);
+        await octokit.rest.pulls.create({
+          owner: params.owner,
+          repo: params.repo,
+          title: params.title,
+          head: head_ref, // Use explicit format
+          base: base_branch, // Use fetched default branch
+          body: params.body,
+        });
+        core.info(`Pull request created successfully! (head: ${head_ref}, base: ${base_branch})`);
+        return;
+      }
     } catch (error: unknown) {
       const http_error = error as { status?: number; message?: string; response?: { data?: any } };
-      core.warning(`PR creation attempt ${attempt + 1} failed.`);
+      core.warning(`PR operation attempt ${attempt + 1} failed.`);
       if (http_error?.status) core.warning(`Status: ${http_error.status}`);
       if (http_error?.message) core.warning(`Message: ${http_error.message}`);
       if (http_error?.response?.data) core.warning(`API Response Data: ${JSON.stringify(http_error.response.data)}`);
@@ -679,7 +704,7 @@ async function create_pull_request_with_retry(
         await new Promise(resolve => setTimeout(resolve, current_delay));
         current_delay *= 2;
       } else {
-        core.error(`Failed to create pull request after ${attempt + 1} attempts.`);
+        core.error(`Failed to create or update pull request after ${attempt + 1} attempts.`);
         throw error;
       }
     }
