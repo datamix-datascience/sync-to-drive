@@ -573,7 +573,7 @@ async function download_file(file_id: string, local_path: string): Promise<void>
 }
 
 // Exec Git Helper
-async function execGit(command: string, args: string[], options: { ignoreReturnCode?: boolean, silent?: boolean } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+async function execute_git(command: string, args: string[], options: { ignoreReturnCode?: boolean, silent?: boolean } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   core.debug(`Executing: git ${command} ${args.join(" ")}`);
   try {
     const result = await getExecOutput("git", [command, ...args], {
@@ -654,11 +654,11 @@ async function handle_drive_changes(
   // *** 1. Get original state ***
   const run_id = process.env.GITHUB_RUN_ID || Date.now();
   const original_state_branch = `original-state-${folder_id}-${run_id}`;
-  const current_branch_result = await execGit('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
+  const current_branch_result = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
   const initial_branch = current_branch_result.stdout.trim();
   core.info(`Current branch is '${initial_branch}'. Creating temporary state branch '${original_state_branch}'`);
-  const initial_commit_hash = (await execGit('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
-  await execGit("checkout", ["-b", original_state_branch, initial_commit_hash]);
+  const initial_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
+  await execute_git("checkout", ["-b", original_state_branch, initial_commit_hash]);
 
   // *** 2. List local and Drive files ***
   const local_files_list = await list_local_files(".");
@@ -677,8 +677,8 @@ async function handle_drive_changes(
     core.info(`Found ${drive_files.size} files and ${drive_folders.size} folders in Drive.`);
   } catch (error) {
     core.error(`Failed list Drive content for folder ${folder_id} during incoming check: ${(error as Error).message}. Aborting.`);
-    await execGit("checkout", [initial_branch]);
-    await execGit("branch", ["-D", original_state_branch]);
+    await execute_git("checkout", [initial_branch]);
+    await execute_git("branch", ["-D", original_state_branch]);
     return;
   }
 
@@ -727,12 +727,12 @@ async function handle_drive_changes(
   // --- Handle New Files ---
   core.debug(`Applying changes: ${new_files.length} new, ${modified_files.length} modified, ${deleted_files.length} potentially deleted.`);
   for (const { path: file_path, id } of new_files) {
-    try { core.info(`Downloading new file from Drive: ${file_path} (ID: ${id})`); await download_file(id, file_path); await execGit("add", [file_path]); changes_staged = true; }
+    try { core.info(`Downloading new file from Drive: ${file_path} (ID: ${id})`); await download_file(id, file_path); await execute_git("add", [file_path]); changes_staged = true; }
     catch (error) { core.error(`Failed to download or stage new file ${file_path}: ${(error as Error).message}`); }
   }
   // --- Handle Modified Files ---
   for (const { path: file_path, id } of modified_files) {
-    try { core.info(`Downloading modified file from Drive: ${file_path} (ID: ${id})`); await download_file(id, file_path); await execGit("add", [file_path]); changes_staged = true; }
+    try { core.info(`Downloading modified file from Drive: ${file_path} (ID: ${id})`); await download_file(id, file_path); await execute_git("add", [file_path]); changes_staged = true; }
     catch (error) { core.error(`Failed to download or stage modified file ${file_path}: ${(error as Error).message}`); }
   }
 
@@ -750,7 +750,7 @@ async function handle_drive_changes(
       for (const file_path of deleted_files) {
         try {
           core.info(`Removing local file deleted in Drive: ${file_path}`);
-          await execGit("rm", ["--ignore-unmatch", file_path]);
+          await execute_git("rm", ["--ignore-unmatch", file_path]);
           changes_staged = true;
           files_actually_removed.push(file_path);
         } catch (error) {
@@ -768,7 +768,7 @@ async function handle_drive_changes(
 
   // *** 6. Commit, Push, and Create PR if changes were staged ***
   if (changes_staged) {
-    const status_result = await execGit('status', ['--porcelain']);
+    const status_result = await execute_git('status', ['--porcelain']);
     if (!status_result.stdout.trim()) {
       core.info("Git status clean after applying changes. No commit needed for incoming changes.");
       changes_staged = false;
@@ -784,15 +784,15 @@ async function handle_drive_changes(
     commit_messages.push(`\nSource Drive Folder ID: ${folder_id}`);
 
     try {
-      await execGit("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
-      await execGit("config", ["--local", "user.name", "github-actions[bot]"]);
-      await execGit("commit", ["-m", commit_messages.join("\n")]);
+      await execute_git("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
+      await execute_git("config", ["--local", "user.name", "github-actions[bot]"]);
+      await execute_git("commit", ["-m", commit_messages.join("\n")]);
       const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
       const head_branch = `sync-from-drive-${sanitized_folder_id}-${run_id}`;
       core.info(`Creating PR branch: ${head_branch}`);
-      await execGit("checkout", ["-b", head_branch]);
+      await execute_git("checkout", ["-b", head_branch]);
       core.info(`Pushing branch ${head_branch} to origin...`);
-      await execGit("push", ["--force", "origin", head_branch]);
+      await execute_git("push", ["--force", "origin", head_branch]);
 
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
       const pr_title = `Sync changes from Google Drive (${folder_id})`;
@@ -816,16 +816,16 @@ async function handle_drive_changes(
   // *** 7. Cleanup: Go back to the original branch and delete the temporary state branch ***
   core.info(`Cleaning up temporary branches. Checking out initial branch '${initial_branch}'`);
   try {
-    await execGit("checkout", [initial_branch]);
+    await execute_git("checkout", [initial_branch]);
     core.info(`Deleting temporary state branch '${original_state_branch}'`);
-    await execGit("branch", ["-D", original_state_branch]);
+    await execute_git("branch", ["-D", original_state_branch]);
   } catch (checkoutError) {
     core.warning(`Failed to checkout initial branch '${initial_branch}' or delete temp branch '${original_state_branch}'. Manual cleanup may be needed. Error: ${(checkoutError as Error).message}`);
     try {
       core.warning("Attempting checkout of 'main'");
-      await execGit("checkout", ["main"]);
+      await execute_git("checkout", ["main"]);
       core.info(`Deleting temporary state branch '${original_state_branch}'`);
-      await execGit("branch", ["-D", original_state_branch], { ignoreReturnCode: true });
+      await execute_git("branch", ["-D", original_state_branch], { ignoreReturnCode: true });
     } catch (mainCheckoutError) {
       core.error("Could not checkout 'main' either. Workspace might be in an inconsistent state.");
     }
