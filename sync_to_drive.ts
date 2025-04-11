@@ -447,7 +447,7 @@ const MIME_TYPE_TO_EXTENSION: { [mimeType: string]: string } = {
   "application/vnd.google-apps.map": "map"
 };
 
-async function create_google_doc_shortcut_file(drive_item: DriveItem, local_path: string): Promise<void> {
+async function create_google_doc_shortcut_file(drive_item: DriveItem, local_path: string): Promise<string> { // Return the created path
   const file_name = path.basename(local_path);
   const file_extension = path.extname(local_path);
   const base_name = path.basename(local_path, file_extension);
@@ -468,16 +468,18 @@ async function create_google_doc_shortcut_file(drive_item: DriveItem, local_path
 
   core.info(`Creating Google Doc shortcut file: ${shortcut_file_path} for '${file_name}' (Drive ID: ${drive_item.id})`);
   await fs_promises.writeFile(shortcut_file_path, shortcut_file_content, { encoding: 'utf-8' });
+  return shortcut_file_path; // Return the actual path created
 }
 
 
 // Download Item (Handles both regular files and Google Docs as shortcuts)
-async function handle_download_item(drive_item: DriveItem, local_path: string): Promise<void> {
+async function handle_download_item(drive_item: DriveItem, local_path_base: string): Promise<string> { // Return the path of the file created/downloaded
   if (GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "")) {
     core.info(`File '${drive_item.name}' is a Google Doc type. Creating shortcut file instead of downloading.`);
-    await create_google_doc_shortcut_file(drive_item, local_path);
+    return await create_google_doc_shortcut_file(drive_item, local_path_base);
   } else {
-    await download_file_content(drive_item.id, local_path);
+    await download_file_content(drive_item.id, local_path_base);
+    return local_path_base; // Return the path where the file was downloaded
   }
 }
 
@@ -528,6 +530,12 @@ async function download_file_content(file_id: string, local_path: string): Promi
 // Upload File
 async function upload_file(file_path: string, folder_id: string, existing_file?: { id: string; name: string }): Promise<{ id: string; success: boolean }> {
   const file_name = path.basename(file_path);
+  // Skip uploading shortcut files
+  if (file_name.endsWith('.json.txt') && GOOGLE_DOC_MIME_TYPES.some(mime => file_name.includes(`.${MIME_TYPE_TO_EXTENSION[mime]}.json.txt`))) {
+    core.info(`Skipping upload of Google Doc shortcut file: ${file_name}`);
+    return { id: existing_file?.id || '', success: true }; // Indicate success but no action taken
+  }
+
   const media = { body: fs.createReadStream(file_path) };
   let fileId = existing_file?.id;
 
@@ -776,11 +784,18 @@ async function handle_drive_changes(
   for (const [drive_path, drive_item] of drive_files) {
     const drive_path_lower = drive_path.toLowerCase();
     // Construct potential shortcut filename for lookup
-    const type_extension = drive_item.mimeType ? MIME_TYPE_TO_EXTENSION[drive_item.mimeType] || 'googledoc' : 'googledoc';
-    const shortcut_filename_lower = `${path.dirname(drive_path)}/${path.basename(drive_path)}.${type_extension}.json.txt`.toLowerCase();
+    const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
+    let shortcut_filename_lower = "";
+    let expected_shortcut_path = "";
+    if (is_google_doc) {
+      const type_extension = MIME_TYPE_TO_EXTENSION[drive_item.mimeType!] || 'googledoc';
+      expected_shortcut_path = `${drive_path}.${type_extension}.json.txt`;
+      shortcut_filename_lower = expected_shortcut_path.toLowerCase();
+    }
+
     // Check both original path and potential shortcut path in local map
     const original_local_key = local_lower_to_original_key.get(drive_path_lower);
-    const shortcut_local_key = local_lower_to_original_key.get(shortcut_filename_lower);
+    const shortcut_local_key = is_google_doc ? local_lower_to_original_key.get(shortcut_filename_lower) : undefined;
     const local_file_info = original_local_key ? local_map.get(original_local_key) : (shortcut_local_key ? local_map.get(shortcut_local_key) : undefined);
     const actual_local_key = original_local_key || shortcut_local_key;
 
@@ -793,10 +808,11 @@ async function handle_drive_changes(
     } else {
       core.debug(`   Found matching local key (case-insensitive): '${actual_local_key}'`);
       found_local_keys.add(actual_local_key); // Add the key that was actually found
-      if (GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "")) {
-        // For Google Docs, we don't compare hash, just existence. Treat as modified if filename format changed.
-        if (actual_local_key !== shortcut_filename_lower.replace(drive_path_lower, drive_path)) { // Compare actual key with expected new format
-          core.info(`Shortcut filename format changed for Google Doc: ${drive_path}. Updating local representation.`);
+
+      if (is_google_doc) {
+        // Treat as modified if the found local key isn't the expected shortcut path
+        if (actual_local_key !== expected_shortcut_path) {
+          core.info(`Shortcut filename format changed for Google Doc: Expected '${expected_shortcut_path}', Found '${actual_local_key}'. Updating local representation.`);
           modified_files.push({ path: drive_path, id: drive_item.id, local_hash: '', drive_hash: '', mimeType: drive_item.mimeType });
         } else {
           core.debug(`Google Doc '${drive_path}' found locally with correct shortcut name. No modification needed.`);
@@ -857,14 +873,11 @@ async function handle_drive_changes(
   for (const { path: file_path, id, mimeType } of new_files) {
     try {
       const local_file_path_base = file_path; // Keep original path base for download/shortcut creation
-      const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(mimeType || "");
-      const final_local_path = is_google_doc
-        ? `${local_file_path_base}.${MIME_TYPE_TO_EXTENSION[mimeType!] || 'googledoc'}.json.txt`
-        : local_file_path_base;
 
-      core.info(`Handling new file from Drive: ${file_path} (ID: ${id}) -> ${final_local_path}`);
-      // Download or create shortcut using the base path
-      await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path_base);
+      core.info(`Handling new file from Drive: ${file_path} (ID: ${id})`);
+      // Download or create shortcut using the base path, get the actual path created
+      const final_local_path = await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path_base);
+
       // Add the final path (potentially with new extension) to git
       await execute_git("add", [final_local_path]);
       added_or_updated_paths_for_commit.push(final_local_path);
@@ -876,14 +889,11 @@ async function handle_drive_changes(
   for (const { path: file_path, id, mimeType } of modified_files) {
     try {
       const local_file_path_base = file_path; // Keep original path base
-      const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(mimeType || "");
-      const final_local_path = is_google_doc
-        ? `${local_file_path_base}.${MIME_TYPE_TO_EXTENSION[mimeType!] || 'googledoc'}.json.txt`
-        : local_file_path_base;
 
-      core.info(`Handling modified file from Drive: ${file_path} (ID: ${id}) -> ${final_local_path}`);
-      // Download or create shortcut using the base path
-      await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path_base);
+      core.info(`Handling modified file from Drive: ${file_path} (ID: ${id})`);
+      // Download or create shortcut using the base path, get the actual path created
+      const final_local_path = await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path_base);
+
       // Add the final path (potentially with new extension) to git
       await execute_git("add", [final_local_path]);
       added_or_updated_paths_for_commit.push(final_local_path);
@@ -897,15 +907,27 @@ async function handle_drive_changes(
   const final_added_paths = added_or_updated_paths_for_commit.filter(p => !local_map.has(p));
   const final_updated_paths = added_or_updated_paths_for_commit.filter(p => local_map.has(p));
   // Only include removed paths if they weren't immediately replaced by an add/update
-  const final_removed_paths = files_actually_removed.filter(p => !added_or_updated_paths_for_commit.includes(p));
+  // And only if the untrack action is 'remove' and trigger wasn't 'push'
+  const final_removed_paths = (trigger_event_name !== 'push' && on_untrack_action === 'remove')
+    ? files_actually_removed.filter(p => !added_or_updated_paths_for_commit.includes(p))
+    : [];
 
 
   // *** 6. Commit, Push, and Create PR if changes were staged ***
+  if (final_added_paths.length > 0 || final_updated_paths.length > 0 || final_removed_paths.length > 0) {
+    changes_staged = true; // Mark as staged if there are any effective changes
+  } else {
+    changes_staged = false;
+    core.info("No effective file changes (add/update/remove based on config) detected after processing. No commit needed.");
+  }
+
+
   if (changes_staged) {
+    // Double check git status just in case file operations failed silently or were reverted
     const status_result = await execute_git('status', ['--porcelain']);
     if (!status_result.stdout.trim()) {
-      core.info("Git status clean after applying changes. No commit needed for incoming changes.");
-      changes_staged = false; // Reset flag if staging resulted in no changes
+      core.warning("Git status clean despite calculated changes. This might indicate an issue. No commit will be made.");
+      changes_staged = false; // Reset flag
     }
   }
 
@@ -921,24 +943,29 @@ async function handle_drive_changes(
     try {
       await execute_git("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
       await execute_git("config", ["--local", "user.name", "github-actions[bot]"]);
+
+      // Commit the changes on the temporary branch first
       await execute_git("commit", ["-m", commit_messages.join("\n")]);
+      // Get the hash of the commit we just made
+      const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
+      core.info(`Created sync commit ${sync_commit_hash} on temporary branch.`);
+
       const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
       // Use a consistent branch name based only on the folder ID for easier PR updating
       const head_branch = `sync-from-drive-${sanitized_folder_id}`;
-      core.info(`Checking out or creating PR branch: ${head_branch}`);
-      // Checkout the branch; create if it doesn't exist from the temporary state branch's commit
-      // Fetch remote branches first to see if the sync branch already exists remotely
-      await execute_git("fetch", ["origin"]);
-      const remote_branch_exists = (await execute_git("branch", ["-r"], { silent: true })).stdout.includes(`origin/${head_branch}`);
-      if (remote_branch_exists) {
-        core.info(`Branch ${head_branch} exists remotely. Checking it out and resetting.`);
-        await execute_git("checkout", [head_branch]);
-        // Reset to the commit we just made on the temporary branch
-        const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim(); // Get hash of the *commit just made* before switching branch
-        await execute_git("reset", ["--hard", sync_commit_hash]); // Reset existing branch to the new state
+      core.info(`Preparing PR branch: ${head_branch}`);
+
+      // Try checking out the branch locally
+      const checkout_result = await execute_git("checkout", [head_branch], { ignoreReturnCode: true, silent: true });
+
+      if (checkout_result.exitCode !== 0) {
+        // Branch doesn't exist locally, create it pointing to the sync commit
+        core.info(`Branch ${head_branch} does not exist locally. Creating it...`);
+        await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
       } else {
-        core.info(`Branch ${head_branch} does not exist remotely. Creating it locally.`);
-        await execute_git("checkout", ["-b", head_branch]); // Create from current commit
+        // Branch exists locally, reset it to the sync commit
+        core.info(`Branch ${head_branch} exists locally. Resetting to commit ${sync_commit_hash}...`);
+        await execute_git("reset", ["--hard", sync_commit_hash]);
       }
 
       core.info(`Pushing branch ${head_branch} to origin...`);
@@ -961,9 +988,8 @@ async function handle_drive_changes(
     } catch (error) {
       core.setFailed(`Failed during commit, push, or PR creation for Drive changes: ${(error as Error).message}`);
     }
-  } else {
-    core.info("No effective changes detected originating from Drive to ADD, UPDATE, or REMOVE (based on config/trigger). No PR needed.");
   }
+  // Step 6 ends here
 
   // *** 7. Cleanup: Go back to the original branch and delete the temporary state branch ***
   core.info(`Cleaning up temporary branches. Checking out initial branch '${initial_branch}'`);
@@ -1028,28 +1054,62 @@ async function sync_to_drive() {
       const files_synced_to_drive = new Set<string>();
       if (folder_path_to_id_map.size > 0) { /* Upload/Update loop */
         for (const [relative_path, local_file] of current_local_map) {
-          files_synced_to_drive.add(relative_path);
-          const drive_file = drive_files_map_outgoing.get(relative_path);
-          const file_name = path.basename(relative_path);
-          const dir_path = path.dirname(relative_path);
+          // Get the original Drive file path (without shortcut extension) for comparison
+          let drive_comparison_path = relative_path;
+          const shortcut_match = relative_path.match(/^(.*)\.([a-zA-Z]+)\.json\.txt$/);
+          if (shortcut_match && GOOGLE_DOC_MIME_TYPES.some(mime => MIME_TYPE_TO_EXTENSION[mime] === shortcut_match[2])) {
+            drive_comparison_path = shortcut_match[1]; // Use the base path for Drive lookup
+            core.debug(`Local file '${relative_path}' identified as shortcut, comparing with Drive path '${drive_comparison_path}'`);
+          }
+
+          files_synced_to_drive.add(drive_comparison_path); // Track the original path
+          const drive_file = drive_files_map_outgoing.get(drive_comparison_path);
+          const file_name_in_drive = path.basename(drive_comparison_path); // Use original name for Drive
+
+          const dir_path = path.dirname(relative_path); // Use local relative path for folder lookup
           const parent_dir_lookup = (dir_path === '.') ? "" : dir_path.replace(/\\/g, '/');
           const target_folder_id = folder_path_to_id_map.get(parent_dir_lookup);
           if (!target_folder_id) { core.warning(`Could not find target folder ID for local file '${relative_path}'. Skipping upload.`); continue; }
+
           // --- Upload/Update Logic ---
-          if (!drive_file) { await upload_file(local_file.path, target_folder_id); }
-          else { /* Update logic */
-            if (drive_file.hash && drive_file.hash !== local_file.hash) { await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name }); }
-            else if (!drive_file.hash && drive_file.mimeType && !drive_file.mimeType.startsWith('application/vnd.google-apps')) { await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name }); }
-            const hashes_match_or_drive_missing = !drive_file.hash || (local_file.hash === drive_file.hash);
-            if (drive_file.name !== file_name && hashes_match_or_drive_missing) { try { await drive.files.update({ fileId: drive_file.id, requestBody: { name: file_name } }); } catch (renameError) { core.warning(`Failed rename file ${drive_file.id}: ${(renameError as Error).message}`); } }
+          // Skip uploading shortcut files explicitly
+          if (relative_path.endsWith('.json.txt') && GOOGLE_DOC_MIME_TYPES.some(mime => relative_path.includes(`.${MIME_TYPE_TO_EXTENSION[mime]}.json.txt`))) {
+            core.debug(`Skipping upload phase for local shortcut file: ${relative_path}`);
+            // Check if Drive file name needs updating (if shortcut represents existing Drive doc)
+            if (drive_file && drive_file.name !== file_name_in_drive) {
+              core.info(`Updating Drive file name for existing Google Doc represented by shortcut '${relative_path}': '${drive_file.name}' to '${file_name_in_drive}' (ID: ${drive_file.id})`);
+              try { await drive.files.update({ fileId: drive_file.id, requestBody: { name: file_name_in_drive } }); }
+              catch (renameError) { core.warning(`Failed rename Google Doc ${drive_file.id}: ${(renameError as Error).message}`); }
+            }
+            continue;
+          }
+
+          // Regular file handling
+          if (!drive_file) {
+            await upload_file(local_file.path, target_folder_id);
+          } else { /* Update logic for regular files */
+            // Check hash for binary files
+            if (drive_file.hash && drive_file.hash !== local_file.hash) {
+              await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name_in_drive });
+            } else if (!drive_file.hash && drive_file.mimeType && !drive_file.mimeType.startsWith('application/vnd.google-apps')) {
+              // Upload if Drive file is missing hash (and not a Google Doc)
+              await upload_file(local_file.path, target_folder_id, { id: drive_file.id, name: file_name_in_drive });
+            }
+            // Check name mismatch even if hashes match or Drive hash is missing
+            if (drive_file.name !== file_name_in_drive) {
+              core.info(`Updating Drive file name: '${drive_file.name}' to '${file_name_in_drive}' (ID: ${drive_file.id})`);
+              try { await drive.files.update({ fileId: drive_file.id, requestBody: { name: file_name_in_drive } }); }
+              catch (renameError) { core.warning(`Failed rename file ${drive_file.id}: ${(renameError as Error).message}`); }
+            }
           }
         }
       } else { core.info("Skipping upload/update phase due to issues in previous steps."); }
 
       // *** STEP 2: Handle Untracked Files/Folders in Drive ***
       core.info("Step 2: Handling untracked items in Drive...");
+      // Use the drive_comparison_path collected in Step 1 for checking untracked items
       const untracked_drive_files = Array.from(drive_files_map_outgoing.entries()).filter(([p]) => !files_synced_to_drive.has(p));
-      const untracked_drive_folders = Array.from(drive_folders_map_outgoing.entries()).filter(([p]) => !Array.from(files_synced_to_drive).some(lp => lp.startsWith(p + '/')));
+      const untracked_drive_folders = Array.from(drive_folders_map_outgoing.entries()).filter(([p]) => !Array.from(files_synced_to_drive).some(lp => lp.startsWith(p + '/'))); // Folder check remains the same
       core.info(`Found ${untracked_drive_files.length} untracked files and ${untracked_drive_folders.length} potentially untracked folders.`);
       const all_untracked_items = [ /* Combine files and folders */ ...untracked_drive_files.map(([p, i]) => ({ path: p, item: i, isFolder: false })), ...untracked_drive_folders.map(([p, i]) => ({ path: p, item: i, isFolder: true }))];
       if (all_untracked_items.length > 0) { /* Untracked logic */
