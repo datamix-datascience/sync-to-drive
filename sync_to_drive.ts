@@ -232,7 +232,6 @@ async function accept_ownership_transfers(file_id: string) {
   }
 }
 
-
 // List Drive Files Recursively
 async function list_drive_files_recursively(
   folder_id: string,
@@ -424,6 +423,91 @@ async function build_folder_structure(
   return folder_map;
 }
 
+const GOOGLE_DOC_MIME_TYPES = [
+  "application/vnd.google-apps.document",
+  "application/vnd.google-apps.spreadsheet",
+  "application/vnd.google-apps.presentation",
+  "application/vnd.google-apps.form",
+  "application/vnd.google-apps.drawing",
+  "application/vnd.google-apps.script",
+  "application/vnd.google-apps.fusiontable",
+  "application/vnd.google-apps.site",
+  "application/vnd.google-apps.map"
+];
+
+
+async function create_google_doc_shortcut_file(drive_item: DriveItem, local_path: string): Promise<void> {
+  const file_name = path.basename(local_path);
+  const file_extension = path.extname(local_path);
+  const base_name = path.basename(local_path, file_extension);
+  const shortcut_file_content = `[Google Drive Shortcut]
+Type: ${drive_item.mimeType}
+Drive URL: https://drive.google.com/drive/d/${drive_item.id}/view?usp=sharing
+Drive File ID: ${drive_item.id}
+MIME Type: ${drive_item.mimeType}
+This file is a shortcut to a Google Drive document. To view or edit the document, open the Drive URL in a web browser.
+`;
+  const shortcut_file_path = local_path + ".url.txt"; // Use .url.txt extension to indicate shortcut
+
+  core.info(`Creating Google Doc shortcut file: ${shortcut_file_path} for '${file_name}' (Drive ID: ${drive_item.id})`);
+  await fs_promises.writeFile(shortcut_file_path, shortcut_file_content, { encoding: 'utf-8' });
+}
+
+
+// Download Item (Handles both regular files and Google Docs as shortcuts)
+async function handle_download_item(drive_item: DriveItem, local_path: string): Promise<void> {
+  if (GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "")) {
+    core.info(`File '${drive_item.name}' is a Google Doc type. Creating shortcut file instead of downloading.`);
+    await create_google_doc_shortcut_file(drive_item, local_path);
+  } else {
+    await download_file_content(drive_item.id, local_path);
+  }
+}
+
+
+// Download File Content (Only for non-Google Docs - binary files)
+async function download_file_content(file_id: string, local_path: string): Promise<void> {
+  core.info(`Downloading Drive file ID ${file_id} to local path ${local_path}`);
+  try {
+    const dir = path.dirname(local_path);
+    await fs_promises.mkdir(dir, { recursive: true });
+    const res = await drive.files.get(
+      { fileId: file_id, alt: "media" },
+      { responseType: "stream" }
+    );
+    const writer = fs.createWriteStream(local_path);
+    return new Promise((resolve, reject) => {
+      res.data
+        .pipe(writer)
+        .on("finish", () => {
+          core.info(`Successfully downloaded file ${file_id} to ${local_path}`);
+          resolve();
+        })
+        .on("error", (err) => {
+          core.error(`Error writing downloaded file ${file_id} to ${local_path}: ${err.message}`);
+          fs.unlink(local_path, unlinkErr => {
+            if (unlinkErr) core.warning(`Failed to clean up partial download ${local_path}: ${unlinkErr.message}`);
+            reject(err);
+          });
+        });
+    });
+  } catch (error) {
+    const err = error as any;
+    if (err.code === 404) {
+      core.error(`Failed to download file ${file_id}: File not found in Google Drive.`);
+    } else if (err.code === 403) {
+      core.error(`Failed to download file ${file_id}: Permission denied. Check service account access.`);
+    } else {
+      core.error(`Failed to download file ${file_id}: ${err.message}`);
+    }
+    if (err.response?.data) {
+      core.error(`API Error Details: ${JSON.stringify(err.response.data)}`);
+    }
+    throw error;
+  }
+}
+
+
 // Upload File
 async function upload_file(file_path: string, folder_id: string, existing_file?: { id: string; name: string }): Promise<{ id: string; success: boolean }> {
   const file_name = path.basename(file_path);
@@ -530,47 +614,6 @@ async function request_ownership_transfer(file_id: string, current_owner_email: 
   }
 }
 
-// Download File
-async function download_file(file_id: string, local_path: string): Promise<void> {
-  core.info(`Downloading Drive file ID ${file_id} to local path ${local_path}`);
-  try {
-    const dir = path.dirname(local_path);
-    await fs_promises.mkdir(dir, { recursive: true });
-    const res = await drive.files.get(
-      { fileId: file_id, alt: "media" },
-      { responseType: "stream" }
-    );
-    const writer = fs.createWriteStream(local_path);
-    return new Promise((resolve, reject) => {
-      res.data
-        .pipe(writer)
-        .on("finish", () => {
-          core.info(`Successfully downloaded file ${file_id} to ${local_path}`);
-          resolve();
-        })
-        .on("error", (err) => {
-          core.error(`Error writing downloaded file ${file_id} to ${local_path}: ${err.message}`);
-          fs.unlink(local_path, unlinkErr => {
-            if (unlinkErr) core.warning(`Failed to clean up partial download ${local_path}: ${unlinkErr.message}`);
-            reject(err);
-          });
-        });
-    });
-  } catch (error) {
-    const err = error as any;
-    if (err.code === 404) {
-      core.error(`Failed to download file ${file_id}: File not found in Google Drive.`);
-    } else if (err.code === 403) {
-      core.error(`Failed to download file ${file_id}: Permission denied. Check service account access.`);
-    } else {
-      core.error(`Failed to download file ${file_id}: ${err.message}`);
-    }
-    if (err.response?.data) {
-      core.error(`API Error Details: ${JSON.stringify(err.response.data)}`);
-    }
-    throw error;
-  }
-}
 
 // Exec Git Helper
 async function execute_git(command: string, args: string[], options: { ignoreReturnCode?: boolean, silent?: boolean } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> {
@@ -682,8 +725,8 @@ async function handle_drive_changes(
     return;
   }
 
-  const new_files: { path: string; id: string }[] = [];
-  const modified_files: { path: string; id: string; local_hash: string; drive_hash?: string }[] = [];
+  const new_files: { path: string; id: string; mimeType?: string }[] = [];
+  const modified_files: { path: string; id: string; local_hash: string; drive_hash?: string; mimeType?: string }[] = [];
   const deleted_files: string[] = [];
   const found_local_keys = new Set<string>();
 
@@ -696,14 +739,14 @@ async function handle_drive_changes(
     if (!local_file || !original_local_key) {
       core.debug(`   Local file NOT FOUND for Drive path: '${drive_path}'`);
       core.info(`New file detected in Drive: ${drive_path} (ID: ${drive_item.id})`);
-      new_files.push({ path: drive_path, id: drive_item.id });
+      new_files.push({ path: drive_path, id: drive_item.id, mimeType: drive_item.mimeType });
     } else {
       core.debug(`   Found matching local key (case-insensitive): '${original_local_key}'`);
       found_local_keys.add(original_local_key);
       if (drive_item.hash && local_file.hash !== drive_item.hash) {
         core.info(`Modified file detected in Drive (hash mismatch): ${drive_path}`);
         core.info(` -> Local hash: ${local_file.hash}, Drive hash: ${drive_item.hash}`);
-        modified_files.push({ path: drive_path, id: drive_item.id, local_hash: local_file.hash, drive_hash: drive_item.hash });
+        modified_files.push({ path: drive_path, id: drive_item.id, local_hash: local_file.hash, drive_hash: drive_item.hash, mimeType: drive_item.mimeType });
       } else if (!drive_item.hash && drive_item.mimeType && !drive_item.mimeType.startsWith('application/vnd.google-apps')) {
         core.warning(`Drive file ${drive_path} exists locally but has no md5Checksum. Cannot verify modification. Skipping update from Drive.`);
       } else { core.debug(`File '${drive_path}' found locally and hashes match or is Google Doc. No modification needed.`); }
@@ -726,13 +769,25 @@ async function handle_drive_changes(
 
   // --- Handle New Files ---
   core.debug(`Applying changes: ${new_files.length} new, ${modified_files.length} modified, ${deleted_files.length} potentially deleted.`);
-  for (const { path: file_path, id } of new_files) {
-    try { core.info(`Downloading new file from Drive: ${file_path} (ID: ${id})`); await download_file(id, file_path); await execute_git("add", [file_path]); changes_staged = true; }
+  for (const { path: file_path, id, mimeType } of new_files) {
+    try {
+      const local_file_path = file_path; // keep original path
+      core.info(`Downloading new file from Drive: ${file_path} (ID: ${id})`);
+      await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path); // Use handle_download_item
+      await execute_git("add", [local_file_path + (GOOGLE_DOC_MIME_TYPES.includes(mimeType || "") ? ".url.txt" : "")]); // Add shortcut file if created
+      changes_staged = true;
+    }
     catch (error) { core.error(`Failed to download or stage new file ${file_path}: ${(error as Error).message}`); }
   }
   // --- Handle Modified Files ---
-  for (const { path: file_path, id } of modified_files) {
-    try { core.info(`Downloading modified file from Drive: ${file_path} (ID: ${id})`); await download_file(id, file_path); await execute_git("add", [file_path]); changes_staged = true; }
+  for (const { path: file_path, id, mimeType } of modified_files) {
+    try {
+      const local_file_path = file_path; // keep original path
+      core.info(`Downloading modified file from Drive: ${file_path} (ID: ${id})`);
+      await handle_download_item({ id, name: path.basename(file_path), mimeType } as DriveItem, local_file_path); // Use handle_download_item
+      await execute_git("add", [local_file_path + (GOOGLE_DOC_MIME_TYPES.includes(mimeType || "") ? ".url.txt" : "")]); // Add shortcut file if created
+      changes_staged = true;
+    }
     catch (error) { core.error(`Failed to download or stage modified file ${file_path}: ${(error as Error).message}`); }
   }
 
@@ -749,8 +804,14 @@ async function handle_drive_changes(
       core.info(`Processing ${deleted_files.length} files potentially deleted in Drive (trigger: ${trigger_event_name}, on_untrack: 'remove').`);
       for (const file_path of deleted_files) {
         try {
-          core.info(`Removing local file deleted in Drive: ${file_path}`);
-          await execute_git("rm", ["--ignore-unmatch", file_path]);
+          const shortcut_file_path = file_path + ".url.txt";
+          if (fs.existsSync(shortcut_file_path)) {
+            core.info(`Removing local shortcut file deleted in Drive: ${shortcut_file_path}`);
+            await execute_git("rm", ["--ignore-unmatch", shortcut_file_path]);
+          } else {
+            core.info(`Removing local file deleted in Drive: ${file_path}`);
+            await execute_git("rm", ["--ignore-unmatch", file_path]);
+          }
           changes_staged = true;
           files_actually_removed.push(file_path);
         } catch (error) {
@@ -778,8 +839,8 @@ async function handle_drive_changes(
   if (changes_staged) {
     core.info("Changes detected originating from Drive. Proceeding with commit and PR.");
     const commit_messages: string[] = ["Sync changes from Google Drive"];
-    if (new_files.length > 0) commit_messages.push(`- Added: ${new_files.map(f => f.path).join(", ")}`);
-    if (modified_files.length > 0) commit_messages.push(`- Updated: ${modified_files.map(f => f.path).join(", ")}`);
+    if (new_files.length > 0) commit_messages.push(`- Added: ${new_files.map(f => f.path + (GOOGLE_DOC_MIME_TYPES.includes(f.mimeType || "") ? ".url.txt" : "")).join(", ")}`);
+    if (modified_files.length > 0) commit_messages.push(`- Updated: ${modified_files.map(f => f.path + (GOOGLE_DOC_MIME_TYPES.includes(f.mimeType || "") ? ".url.txt" : "")).join(", ")}`);
     if (files_actually_removed.length > 0) commit_messages.push(`- Removed: ${files_actually_removed.join(", ")}`);
     commit_messages.push(`\nSource Drive Folder ID: ${folder_id}`);
 
@@ -797,8 +858,8 @@ async function handle_drive_changes(
       const [owner, repo] = process.env.GITHUB_REPOSITORY!.split("/");
       const pr_title = `Sync changes from Google Drive (${folder_id})`;
       const pr_body = `This PR syncs changes detected in Google Drive folder [${folder_id}](https://drive.google.com/drive/folders/${folder_id}):\n` +
-        (new_files.length > 0 ? `*   **Added:** ${new_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") +
-        (modified_files.length > 0 ? `*   **Updated:** ${modified_files.map(f => `\`${f.path}\``).join(", ")}\n` : "") +
+        (new_files.length > 0 ? `*   **Added:** ${new_files.map(f => `\`${f.path + (GOOGLE_DOC_MIME_TYPES.includes(f.mimeType || "") ? ".url.txt" : "")}\``).join(", ")}\n` : "") +
+        (modified_files.length > 0 ? `*   **Updated:** ${modified_files.map(f => `\`${f.path + (GOOGLE_DOC_MIME_TYPES.includes(f.mimeType || "") ? ".url.txt" : "")}\``).join(", ")}\n` : "") +
         (files_actually_removed.length > 0 ? `*   **Removed:** ${files_actually_removed.map(f => `\`${f}\``).join(", ")}\n` : "") + // Use actual removed files
         `\n*Workflow Run ID: ${run_id}*`;
 
