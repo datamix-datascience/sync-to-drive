@@ -11,7 +11,7 @@ import { upload_file } from "./libs/google-drive/files";
 import { delete_untracked } from "./libs/google-drive/delete";
 import { request_ownership_transfer, accept_ownership_transfers } from "./libs/google-drive/ownership";
 import { handle_drive_changes } from "./libs/sync-logic/handle-drive-changes";
-import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "./libs/google-drive/shortcuts";
+import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "./libs/google-drive/file_types";
 import { DriveItem } from "./libs/google-drive/types";
 import { drive } from "./libs/google-drive/auth"; // Needed for direct Drive calls (rename)
 
