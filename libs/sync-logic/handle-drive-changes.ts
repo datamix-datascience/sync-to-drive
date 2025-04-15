@@ -8,7 +8,7 @@ import { handle_download_item } from "../google-drive/files";
 import { create_pull_request_with_retry } from "../github/pull-requests";
 import { octokit } from "../github/auth"; // Get the initialized octokit instance
 import { DriveItem } from "../google-drive/types";
-import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "../google-drive/shortcuts";
+import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "../google-drive/file_types";
 import { FileInfo } from "../local-files/types";
 
 
@@ -177,7 +177,7 @@ export async function handle_drive_changes(
             core.debug(` -> Google Doc '${drive_path}' found locally as correct shortcut '${actual_found_local_key}'. No content change needed.`);
           }
         } else if (!is_google_doc) {
-          const is_local_file_shortcut_format = actual_found_local_key.endsWith('.json.txt') && GOOGLE_DOC_MIME_TYPES.some(mime => actual_found_local_key.includes(`.${MIME_TYPE_TO_EXTENSION[mime]}.json.txt`));
+          const is_local_file_shortcut_format = actual_found_local_key.endsWith('.json.txt') && GOOGLE_DOC_MIME_TYPES.some(mime => actual_found_local_key.includes(`.gdrive-link.json.txt`));
           if (is_local_file_shortcut_format) {
             core.info(`Modification detected for non-GDoc '${drive_path}': Local file '${actual_found_local_key}' is an unexpected shortcut format. Updating.`);
             needs_modification = true;
@@ -292,16 +292,23 @@ export async function handle_drive_changes(
         if (local_dir && local_dir !== '.') {
           await fs.promises.mkdir(local_dir, { recursive: true });
         }
-        const final_local_path = await handle_download_item(drive_item, target_local_path);
-        core.info(`Staging added/updated file: ${final_local_path}`);
-        await execute_git("add", ["--", final_local_path]);
-        added_or_updated_paths_final.add(final_local_path);
-        changes_made = true;
+        const { linkFilePath, contentFilePath } = await handle_download_item(drive_item, target_local_path);
 
-        if (removed_paths_final.has(final_local_path)) {
-          core.debug(`Path ${final_local_path} was added/updated, removing from final deletion list.`);
-          removed_paths_final.delete(final_local_path);
+        const add_or_updated = async (final_local_path?: string) => {
+          if (!final_local_path) return;
+          core.info(`Staging added/updated file: ${final_local_path}`);
+          await execute_git("add", ["--", final_local_path]);
+          added_or_updated_paths_final.add(final_local_path);
+          changes_made = true;
+
+          if (removed_paths_final.has(final_local_path)) {
+            core.debug(`Path ${final_local_path} was added/updated, removing from final deletion list.`);
+            removed_paths_final.delete(final_local_path);
+          }
         }
+
+        add_or_updated(linkFilePath);
+        add_or_updated(contentFilePath);
       } catch (error) {
         core.error(`Failed to process/stage item from Drive ${drive_item.name || `(ID: ${drive_item.id})`} to ${target_local_path}: ${(error as Error).message}`);
       }
