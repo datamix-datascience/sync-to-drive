@@ -307,8 +307,8 @@ export async function handle_drive_changes(
           }
         }
 
-        add_or_updated(linkFilePath);
-        add_or_updated(contentFilePath);
+        await add_or_updated(linkFilePath);
+        await add_or_updated(contentFilePath);
       } catch (error) {
         core.error(`Failed to process/stage item from Drive ${drive_item.name || `(ID: ${drive_item.id})`} to ${target_local_path}: ${(error as Error).message}`);
       }
