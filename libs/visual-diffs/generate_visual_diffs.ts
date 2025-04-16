@@ -65,19 +65,23 @@ async function commit_and_push_pngs(
 ): Promise<void> {
   core.startGroup('Committing and Pushing PNGs');
   try {
-    // Configure Git user (might be redundant if done globally, but safe)
+    // Ensure we are on the correct branch
+    core.info(`Checking out branch '${params.head_branch}'...`);
+    await execute_git('fetch', ['origin', params.head_branch], { silent: true });
+    await execute_git('checkout', [params.head_branch]);
+
+    // Configure Git user
     await execute_git("config", ["--local", "user.email", params.git_user_email]);
     await execute_git("config", ["--local", "user.name", params.git_user_name]);
 
     core.info(`Adding generated files in '${params.output_base_dir}' to Git index...`);
-    // Add only the specific output directory
     await execute_git('add', [params.output_base_dir]);
 
-    // Check if there are staged changes *within* the target directory
+    // Check if there are staged changes
     const status_result = await execute_git(
       'status',
       ['--porcelain', '--', params.output_base_dir],
-      { ignoreReturnCode: true } // Don't fail if no changes
+      { ignoreReturnCode: true }
     );
 
     if (!status_result.stdout.trim()) {
@@ -91,15 +95,13 @@ async function commit_and_push_pngs(
     await execute_git('commit', ['-m', commit_message]);
 
     core.info(`Pushing changes to branch ${params.head_branch}...`);
-    // Use --force-with-lease if possible and safer, but simple force for automation is common
-    await execute_git('push', ['origin', params.head_branch]);
+    // Use --force-with-lease to avoid overwriting unrelated changes
+    await execute_git('push', ['--force-with-lease', 'origin', params.head_branch]);
 
     core.info('Changes pushed successfully.');
-
   } catch (error: any) {
     core.error(`Failed to commit and push PNG changes: ${error.message}`);
-    // Don't setFailed here, let the main function decide based on overall success
-    throw error; // Re-throw to signal failure of this step
+    throw error;
   } finally {
     core.endGroup();
   }
@@ -116,6 +118,15 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   core.info(`Looking for link files ending with: ${params.link_file_suffix}`);
   core.info(`Outputting PNGs to directory: ${params.output_base_dir}`);
   core.info(`PNG Resolution: ${params.resolution_dpi} DPI`);
+
+  // Debug current branch and HEAD
+  core.info('Debugging current Git state...');
+  const currentBranch = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
+  core.info(`Current branch: ${currentBranch.stdout.trim()}`);
+  const currentHead = await execute_git('rev-parse', ['HEAD'], { silent: true });
+  core.info(`Current HEAD SHA: ${currentHead.stdout.trim()}`);
+  const branchStatus = await execute_git('status', ['--short'], { silent: true });
+  core.info(`Git status:\n${branchStatus.stdout}`);
 
   // --- Skip Check ---
   if (await should_skip_generation(params.head_branch)) {
@@ -292,10 +303,17 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     const commit_message = `${SKIP_CI_TAG} Generate visual diff PNGs for PR #${params.pr_number}\n\nGenerates ${total_pngs_generated} PNG(s) for:\n- ${processed_files_info.join('\n- ')}`;
     try {
       await commit_and_push_pngs(params, commit_message);
+      // Debug post-commit state
+      core.info('Debugging post-commit Git state...');
+      const postCommitBranch = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
+      core.info(`Post-commit branch: ${postCommitBranch.stdout.trim()}`);
+      const postCommitHead = await execute_git('rev-parse', ['HEAD'], { silent: true });
+      core.info(`Post-commit HEAD SHA: ${postCommitHead.stdout.trim()}`);
+      const postCommitLog = await execute_git('log', ['-1', '--pretty=%H %s'], { silent: true });
+      core.info(`Latest commit:\n${postCommitLog.stdout}`);
     } catch (commitError) {
-      // Failure in commit/push should be considered a failure of the step
       core.error("Visual diff generation succeeded, but committing/pushing PNGs failed.");
-      throw commitError; // Propagate failure
+      throw commitError;
     }
   } else {
     core.info('No PNGs were generated or committed in this run.');
