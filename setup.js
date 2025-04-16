@@ -11,6 +11,10 @@ try {
     stdio: "inherit",
     cwd: path.resolve(__dirname),
   });
+  execSync("ls -R dist", {
+    stdio: "inherit",
+    cwd: path.resolve(__dirname),
+  });
   console.log("Dependencies installed successfully.");
 } catch (error) {
   console.error("Failed to install dependencies:", error.message);
