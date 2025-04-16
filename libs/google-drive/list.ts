@@ -22,7 +22,7 @@ export async function list_drive_files_recursively(
     do {
       const res = await drive.files.list({
         q: `'${folder_id}' in parents and trashed = false`,
-        fields: "nextPageToken, files(id, name, mimeType, md5Checksum, owners(emailAddress))",
+        fields: "nextPageToken, files(id, name, mimeType, md5Checksum, modifiedTime, owners(emailAddress))",
         spaces: "drive",
         pageToken: next_page_token,
         pageSize: 1000,
@@ -65,6 +65,7 @@ export async function list_drive_files_recursively(
       folder_map.set(relative_path, {
         id: item.id,
         name: item.name,
+        modifiedTime: item.modifiedTime,
         mimeType: item.mimeType,
         owned,
         permissions
@@ -81,7 +82,8 @@ export async function list_drive_files_recursively(
       file_map.set(relative_path, {
         id: item.id,
         name: item.name,
-        mimeType: item.mimeType,
+        mimeType: item.mimeType || "unknown",
+        modifiedTime: item.modifiedTime,
         hash: item.md5Checksum,
         owned,
         permissions

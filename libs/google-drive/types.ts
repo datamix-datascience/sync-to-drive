@@ -4,6 +4,7 @@ export interface DriveFile {
   mimeType?: string;
   md5Checksum?: string;
   owners?: { emailAddress: string }[];
+  modifiedTime: string;
 }
 
 export interface DriveFilesListResponse {

@@ -1,12 +1,12 @@
 import * as core from "@actions/core";
 import * as path from "path";
-import * as fs from "fs"; // Need fs.promises
+import * as fs from "fs";
 import { execute_git } from "../git.js";
 import { list_local_files } from "../local-files/list.js";
 import { list_drive_files_recursively } from "../google-drive/list.js";
 import { handle_download_item } from "../google-drive/files.js";
 import { create_pull_request_with_retry } from "../github/pull-requests.js";
-import { octokit } from "../github/auth.js"; // Get the initialized octokit instance
+import { octokit } from "../github/auth.js";
 import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES } from "../google-drive/file_types.js";
 // Helper to safely get repo owner and name
 function get_repo_info() {
@@ -68,8 +68,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
     // If this fails, the function will exit early.
     const initial_branch = await determineInitialBranch(repo_info);
     try {
-        // *** 1. Create temporary state branch ***
-        // initial_branch is guaranteed to be assigned here.
+        // Step 1: Create temporary state branch
         original_state_branch = `original-state-${folder_id}-${run_id}`;
         core.info(`Initial branch is '${initial_branch}'. Creating temporary state branch '${original_state_branch}'`);
         const initial_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
@@ -78,7 +77,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             throw new Error("Could not get initial commit hash.");
         }
         await execute_git("checkout", ["-b", original_state_branch, initial_commit_hash]);
-        // *** 2. List local files from the state branch ***
+        // Step 2: List local files
         core.info("Listing local files from original state branch...");
         const local_files_list = await list_local_files("."); // List files in the checked-out original state
         const local_map = new Map(local_files_list.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
@@ -89,7 +88,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             local_lower_to_original_key.set(key.toLowerCase(), key);
         });
         core.debug(`Created lowercase lookup map with ${local_lower_to_original_key.size} entries.`);
-        // *** 3. List Drive content ***
+        // Step 3: List Drive content
         core.info("Listing Drive content for incoming change comparison...");
         let drive_files;
         let drive_folders;
@@ -104,13 +103,13 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             // Jump to finally for cleanup, don't proceed with comparison/PR
             return result; // Return empty result
         }
-        // *** 4. Compare Drive state to local state ***
+        // Step 4: Compare Drive state to local state
         const new_files_to_process = [];
         const modified_files_to_process = [];
         const deleted_local_paths = [];
         const found_local_keys = new Set();
         for (const [drive_path, drive_item] of drive_files) {
-            core.debug(`Comparing Drive item: '${drive_path}' (ID: ${drive_item.id})`);
+            core.debug(`Comparing Drive item: '${drive_path}' (ID: ${drive_item.id}, MIME: ${drive_item.mimeType}, modifiedTime: ${drive_item.modifiedTime})`);
             const drive_path_lower = drive_path.toLowerCase();
             const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
             const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType || "");
@@ -142,10 +141,18 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                         found_local_keys.add(match_link_key);
                         try {
                             const link_content = await fs.promises.readFile(match_link_key, "utf-8");
+                            core.debug(` -> Existing .gdrive.json content for '${match_link_key}': ${link_content}`);
                             const link_data = JSON.parse(link_content);
                             const stored_modified_time = link_data.modifiedTime;
                             const drive_modified_time = drive_item.modifiedTime;
-                            if (!stored_modified_time || !drive_modified_time) {
+                            core.debug(` -> Google Doc '${drive_path}' modifiedTime comparison: stored=${stored_modified_time}, drive=${drive_modified_time}`);
+                            // Validate modifiedTime format
+                            if (drive_modified_time && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z$/.test(drive_modified_time)) {
+                                core.warning(` -> Invalid modifiedTime format for '${drive_path}': ${drive_modified_time}`);
+                                needs_processing = true;
+                                reason = "invalid modifiedTime format";
+                            }
+                            else if (!stored_modified_time || !drive_modified_time) {
                                 core.debug(` -> Google Doc '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
                                 needs_processing = true;
                                 reason = "missing modifiedTime data";
@@ -190,10 +197,18 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                             found_local_keys.add(match_link_key);
                             try {
                                 const link_content = await fs.promises.readFile(match_link_key, "utf-8");
+                                core.debug(` -> Existing .gdrive.json content for '${match_link_key}': ${link_content}`);
                                 const link_data = JSON.parse(link_content);
                                 const stored_modified_time = link_data.modifiedTime;
                                 const drive_modified_time = drive_item.modifiedTime;
-                                if (!stored_modified_time || !drive_modified_time) {
+                                core.debug(` -> PDF '${drive_path}' modifiedTime comparison: stored=${stored_modified_time}, drive=${drive_modified_time}`);
+                                // Validate modifiedTime format
+                                if (drive_modified_time && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z$/.test(drive_modified_time)) {
+                                    core.warning(` -> Invalid modifiedTime format for '${drive_path}': ${drive_modified_time}`);
+                                    needs_processing = true;
+                                    reason = "invalid modifiedTime format";
+                                }
+                                else if (!stored_modified_time || !drive_modified_time) {
                                     core.debug(` -> PDF '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
                                     needs_processing = true;
                                     reason = "missing modifiedTime data";
@@ -231,10 +246,18 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                             found_local_keys.add(match_link_key);
                             try {
                                 const link_content = await fs.promises.readFile(match_link_key, "utf-8");
+                                core.debug(` -> Existing .gdrive.json content for '${match_link_key}': ${link_content}`);
                                 const link_data = JSON.parse(link_content);
                                 const stored_modified_time = link_data.modifiedTime;
                                 const drive_modified_time = drive_item.modifiedTime;
-                                if (!stored_modified_time || !drive_modified_time) {
+                                core.debug(` -> PDF '${drive_path}' modifiedTime comparison: stored=${stored_modified_time}, drive=${drive_modified_time}`);
+                                // Validate modifiedTime format
+                                if (drive_modified_time && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z$/.test(drive_modified_time)) {
+                                    core.warning(` -> Invalid modifiedTime format for '${drive_path}': ${drive_modified_time}`);
+                                    needs_processing = true;
+                                    reason = "invalid modifiedTime format";
+                                }
+                                else if (!stored_modified_time || !drive_modified_time) {
                                     core.debug(` -> PDF '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
                                     needs_processing = true;
                                     reason = "missing modifiedTime data";
@@ -286,7 +309,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                     core.warning(`Found unexpected local link file '${match_link_key}' for non-PDF, non-Google Doc '${drive_path}'. Scheduling for deletion.`);
                     if (match_link_key) {
                         found_local_keys.add(match_link_key);
-                        deleted_local_paths.push(match_link_key); // Auto-delete unexpected link files
+                        deleted_local_paths.push(match_link_key);
                     }
                 }
             }
@@ -299,8 +322,8 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                     new_files_to_process.push({ path: drive_path, item: drive_item });
                 }
             }
-        } // End of comparison loop
-        // *** 5. Identify files/folders deleted in Drive ***
+        }
+        // Step 5: Identify deletions
         core.debug("Checking for items deleted in Drive...");
         for (const [local_key, _local_file_info] of local_map) {
             if (!found_local_keys.has(local_key)) {
@@ -351,11 +374,11 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             }
         }
         core.info(`Identified ${deleted_local_paths.length} local paths corresponding to items potentially deleted/renamed in Drive.`);
-        // *** 6. Apply changes locally and stage them ***
+        // Step 6: Apply changes locally and stage them
         let changes_made = false;
         const added_or_updated_paths_final = new Set();
         const removed_paths_final = new Set();
-        // --- Handle Deletions FIRST ---
+        // Handle Deletions
         const should_remove = trigger_event_name !== 'push' && on_untrack_action === 'remove';
         if (deleted_local_paths.length > 0) {
             if (should_remove) {
@@ -391,7 +414,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 deleted_local_paths.forEach(fp => core.info(`  - Skipped removal: ${fp}`));
             }
         }
-        // --- Handle New and Modified Files ---
+        // Handle New and Modified Files
         const items_to_process = [...new_files_to_process, ...modified_files_to_process];
         core.info(`Processing ${new_files_to_process.length} new and ${modified_files_to_process.length} modified items from Drive...`);
         for (const { path: original_drive_path, item: drive_item } of items_to_process) {
@@ -417,7 +440,21 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                         return;
                     }
                     core.info(`Staging added/updated file: ${file_path_to_stage}`);
+                    // Debug: Check Git ignore status
+                    const ignore_check = await execute_git("check-ignore", [file_path_to_stage], { ignoreReturnCode: true });
+                    core.debug(`Git check-ignore for '${file_path_to_stage}': ${ignore_check.stdout || "not ignored"}`);
                     await execute_git("add", ["--", file_path_to_stage]);
+                    // Debug: Verify staging
+                    const add_status = await execute_git("status", ["--porcelain", "--", file_path_to_stage], { ignoreReturnCode: true });
+                    core.debug(`Git status after adding '${file_path_to_stage}':\n${add_status.stdout}`);
+                    // Debug: Log file content
+                    try {
+                        const content = await fs.promises.readFile(file_path_to_stage, "utf-8");
+                        core.debug(`Staged file content for '${file_path_to_stage}': ${content}`);
+                    }
+                    catch (error) {
+                        core.debug(`Could not read staged file '${file_path_to_stage}' (binary or error): ${error.message}`);
+                    }
                     added_or_updated_paths_final.add(file_path_to_stage);
                     changes_made = true;
                     // If this file was previously marked for removal, unmark it
@@ -433,13 +470,12 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             catch (error) {
                 core.error(`Failed to process/stage item from Drive ${drive_item.name || `(ID: ${drive_item.id})`} to ${target_content_local_path}: ${error.message}`);
             }
-        } // End of processing loop
-        // *** 7. Commit, Push, and Create PR if changes were made ***
-        // Re-check git status after all operations
+        }
+        // Step 7: Commit, Push, and Create PR
         const status_result = await execute_git('status', ['--porcelain']);
         if (!status_result.stdout.trim()) {
             core.info("Git status clean after processing changes. No commit needed.");
-            return result; // Return empty result
+            return result;
         }
         else {
             core.info("Git status is not clean, proceeding with commit.");
@@ -453,7 +489,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         // Proceed only if changes_made is true (set during add/rm or by status check)
         if (!changes_made) {
             core.info("No effective file changes detected after final status check. Skipping commit and PR.");
-            return result; // Return empty result
+            return result;
         }
         core.info("Changes detected originating from Drive. Proceeding with commit and PR.");
         const commit_messages = [`Sync changes from Google Drive (${folder_id})`];
@@ -523,7 +559,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 repo: repo_info.repo,
                 title: pr_title,
                 head: head_branch,
-                base: initial_branch, // Use the safely determined initial branch
+                base: initial_branch,
                 body: pr_body
             };
             core.info(`Attempting to create or update Pull Request: ${pr_title} (${head_branch} -> ${initial_branch})`);
@@ -541,18 +577,14 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         }
         catch (error) {
             core.error(`Failed during commit, push, or PR creation: ${error.message}`);
-            result = {}; // Clear result on error
+            result = {};
         }
     }
     catch (error) {
-        // Catch errors from the main sync logic (state branching, listing, comparison, processing)
         core.error(`Error during Drive change handling for folder ${folder_id}: ${error.message}`);
-        result = {}; // Clear result on error
-        // Allow finally block to run for cleanup
+        result = {};
     }
     finally {
-        // *** 8. Cleanup ***
-        // initial_branch is guaranteed to be assigned because determineInitialBranch runs first and throws on failure.
         core.info(`Cleaning up temporary branch '${original_state_branch}' and returning to '${initial_branch}'`);
         try {
             const current_cleanup_branch_result = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true, ignoreReturnCode: true });
