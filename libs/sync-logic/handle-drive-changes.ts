@@ -172,39 +172,46 @@ export async function handle_drive_changes(
         }
 
       } else {
-        // For non-Google Docs (binary files), we expect the content file AND the link file.
+        // For non-Google Docs (binary/downloadable files), we expect ONLY the content file.
+        // Link files (.gdrive.json) are only for Google Docs.
         let reason = "";
         if (!local_content_info) {
+          // Content file doesn't exist locally. This is a new file or a modified file where local was deleted.
           reason = "missing local content file";
           needs_processing = true;
-        } else if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
-          reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
-          needs_processing = true;
-        } else if (!drive_item.hash) {
-          reason = "Drive item missing hash"; // Treat as modified
-          needs_processing = true;
-        }
-
-        if (!local_link_info) {
-          reason += reason ? " and missing link file" : "missing link file";
-          needs_processing = true;
+          core.debug(` -> Binary file '${drive_path}' is NEW or missing locally.`);
         } else {
-          // Link file exists, content matches (or hash missing). Mark link file as found.
-          if (match_link_key) found_local_keys.add(match_link_key);
-          // Also mark for processing to ensure link file is up-to-date even if content matches
-          if (!needs_processing) {
-            core.debug(` -> Binary file '${drive_path}' content matches, link file found. Marking for potential link file update.`);
-            needs_processing = true; // Ensure link file consistency
+          // Content file exists locally. Check hash.
+          if (match_content_key) found_local_keys.add(match_content_key); // Mark content file as found
+
+          if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
+            // Hash mismatch indicates modification.
+            reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
+            needs_processing = true;
+            core.debug(` -> Binary file '${drive_path}' has hash mismatch.`);
+          } else if (!drive_item.hash) {
+            // Drive item missing hash. We cannot reliably compare, treat as modified to ensure it's downloaded.
+            reason = "Drive item missing hash";
+            needs_processing = true;
+            core.debug(` -> Binary file '${drive_path}' in Drive is missing hash. Treating as modified.`);
+          } else {
+            // Content file exists and hash matches (or Drive hash missing but we already handled that)
+            core.debug(` -> Binary file '${drive_path}' matches local state based on hash or existence.`);
+            needs_processing = false; // No processing needed if hashes match
           }
         }
 
-        if (needs_processing) {
-          core.info(`Modification detected for binary file '${drive_path}': ${reason}.`);
-        } else {
-          core.debug(` -> Binary file '${drive_path}' matches local state.`);
+        // Check for unexpected link file for a binary file
+        if (local_link_info) {
+          core.warning(`Found unexpected local link file '${match_link_key}' for non-Google Doc '${drive_path}'. This file will be ignored during sync, but might be removed if deleted from Drive.`);
+          // We add it to found_local_keys so it can be correctly handled by the deletion logic if it disappears from Drive
+          // Although ideally, it shouldn't exist at all for binary files.
+          if (match_link_key) found_local_keys.add(match_link_key);
         }
-        // Mark content as found if it existed
-        if (match_content_key) found_local_keys.add(match_content_key);
+
+        if (needs_processing) {
+          core.info(`Change detected for binary file '${drive_path}': ${reason}. Marking for processing.`);
+        }
       }
 
       // Add to the correct processing list
