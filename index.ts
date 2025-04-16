@@ -1,3 +1,5 @@
+const __dirname = path.dirname(".");
+
 import * as core from "@actions/core";
 import * as path from "path";
 import * as github from '@actions/github'; // Need this for context
@@ -17,6 +19,7 @@ import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "./libs/google-dri
 import { DriveItem } from "./libs/google-drive/types";
 // Import the new visual diff generator
 import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visual_diffs';
+
 
 // --- Get Inputs ---
 const trigger_event_name = core.getInput('trigger_event_name', { required: true });
