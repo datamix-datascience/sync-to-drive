@@ -7,7 +7,7 @@ import { list_drive_files_recursively } from "../google-drive/list.js";
 import { handle_download_item } from "../google-drive/files.js";
 import { create_pull_request_with_retry } from "../github/pull-requests.js";
 import { octokit } from "../github/auth.js"; // Get the initialized octokit instance
-import { GOOGLE_DOC_MIME_TYPES } from "../google-drive/file_types.js";
+import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES } from "../google-drive/file_types.js";
 // Helper to safely get repo owner and name
 function get_repo_info() {
     const repo_full_name = process.env.GITHUB_REPOSITORY;
@@ -108,88 +108,190 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         const new_files_to_process = [];
         const modified_files_to_process = [];
         const deleted_local_paths = [];
-        const found_local_keys = new Set(); // Track original local paths found
+        const found_local_keys = new Set();
         for (const [drive_path, drive_item] of drive_files) {
             core.debug(`Comparing Drive item: '${drive_path}' (ID: ${drive_item.id})`);
             const drive_path_lower = drive_path.toLowerCase();
             const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
-            // Define expected local paths
-            const expected_content_path = drive_path; // Path for the actual file content (if not GDoc)
-            const expected_link_path = `${drive_path}.gdrive.json`; // Path for the link file
-            // Use lowercase map for finding potential matches
+            const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType || "");
+            const expected_content_path = drive_path;
+            const expected_link_path = needs_link_file ? `${drive_path}.gdrive.json` : null;
             const match_content_key = local_lower_to_original_key.get(expected_content_path.toLowerCase());
-            const match_link_key = local_lower_to_original_key.get(expected_link_path.toLowerCase());
+            const match_link_key = expected_link_path ? local_lower_to_original_key.get(expected_link_path.toLowerCase()) : null;
             const local_content_info = match_content_key ? local_map.get(match_content_key) : undefined;
             const local_link_info = match_link_key ? local_map.get(match_link_key) : undefined;
-            let needs_processing = false; // Flag if Drive item needs download/link update
+            let needs_processing = false;
+            let reason = "";
             if (is_google_doc) {
-                // For Google Docs, we expect ONLY the link file locally. Content file is an error.
+                // Google Docs: Expect only .gdrive.json, no content file
                 if (local_content_info) {
-                    core.warning(`Found unexpected local content file '${match_content_key}' for Google Doc '${drive_path}'. It should only have a link file. Marking for processing to fix.`);
-                    needs_processing = true; // Will overwrite/remove content file and ensure link file
+                    core.warning(`Found unexpected local content file '${match_content_key}' for Google Doc '${drive_path}'. Marking for processing to fix.`);
+                    needs_processing = true;
                     if (match_content_key)
-                        found_local_keys.add(match_content_key); // Mark content as found (to be deleted)
+                        found_local_keys.add(match_content_key);
+                    reason = "unexpected content file";
                 }
                 if (!local_link_info) {
                     core.debug(` -> Google Doc '${drive_path}' is NEW or missing its link file locally.`);
-                    needs_processing = true; // Create the link file
+                    needs_processing = true;
+                    reason = "missing link file";
                 }
                 else {
-                    // Link file exists. Check if it needs update (e.g., Drive item name changed).
-                    // We'll re-create the link file during processing anyway, so mark it.
-                    core.debug(` -> Google Doc '${drive_path}' link file found locally ('${match_link_key}'). Marking for potential update.`);
+                    // Check modifiedTime for existing link file
+                    if (match_link_key) {
+                        found_local_keys.add(match_link_key);
+                        try {
+                            const link_content = await fs.promises.readFile(match_link_key, "utf-8");
+                            const link_data = JSON.parse(link_content);
+                            const stored_modified_time = link_data.modifiedTime;
+                            const drive_modified_time = drive_item.modifiedTime;
+                            if (!stored_modified_time || !drive_modified_time) {
+                                core.debug(` -> Google Doc '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
+                                needs_processing = true;
+                                reason = "missing modifiedTime data";
+                            }
+                            else if (stored_modified_time !== drive_modified_time) {
+                                core.debug(` -> Google Doc '${drive_path}' modified (Drive: ${drive_modified_time}, Local: ${stored_modified_time}). Marking for update.`);
+                                needs_processing = true;
+                                reason = `modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
+                            }
+                            else {
+                                core.debug(` -> Google Doc '${drive_path}' link file found and modifiedTime matches. No update needed.`);
+                            }
+                        }
+                        catch (error) {
+                            core.warning(`Failed to read or parse link file '${match_link_key}': ${error.message}. Marking for update.`);
+                            needs_processing = true;
+                            reason = "failed to parse link file";
+                        }
+                    }
+                }
+            }
+            else if (needs_link_file) {
+                // PDFs: Expect both content file and .gdrive.json
+                if (!local_content_info) {
+                    core.debug(` -> PDF '${drive_path}' is NEW or missing its content file locally.`);
                     needs_processing = true;
-                    if (match_link_key)
-                        found_local_keys.add(match_link_key); // Mark link as found
+                    reason = "missing content file";
+                }
+                else {
+                    if (match_content_key)
+                        found_local_keys.add(match_content_key);
+                    // Check hash for content
+                    if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
+                        core.debug(` -> PDF '${drive_path}' has hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash}). Marking for update.`);
+                        needs_processing = true;
+                        reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
+                    }
+                    else if (!drive_item.hash) {
+                        core.debug(` -> PDF '${drive_path}' in Drive is missing hash. Checking modifiedTime.`);
+                        // Fallback to modifiedTime if hash is unavailable
+                        if (local_link_info && match_link_key) {
+                            found_local_keys.add(match_link_key);
+                            try {
+                                const link_content = await fs.promises.readFile(match_link_key, "utf-8");
+                                const link_data = JSON.parse(link_content);
+                                const stored_modified_time = link_data.modifiedTime;
+                                const drive_modified_time = drive_item.modifiedTime;
+                                if (!stored_modified_time || !drive_modified_time) {
+                                    core.debug(` -> PDF '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
+                                    needs_processing = true;
+                                    reason = "missing modifiedTime data";
+                                }
+                                else if (stored_modified_time !== drive_modified_time) {
+                                    core.debug(` -> PDF '${drive_path}' modified (Drive: ${drive_modified_time}, Local: ${stored_modified_time}). Marking for update.`);
+                                    needs_processing = true;
+                                    reason = `modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
+                                }
+                                else {
+                                    core.debug(` -> PDF '${drive_path}' content and modifiedTime match. No update needed.`);
+                                }
+                            }
+                            catch (error) {
+                                core.warning(`Failed to read or parse link file '${match_link_key}': ${error.message}. Marking for update.`);
+                                needs_processing = true;
+                                reason = "failed to parse link file";
+                            }
+                        }
+                        else {
+                            core.debug(` -> PDF '${drive_path}' missing link file. Marking for update to create it.`);
+                            needs_processing = true;
+                            reason = "missing link file";
+                        }
+                    }
+                    else {
+                        core.debug(` -> PDF '${drive_path}' content matches based on hash. Checking link file.`);
+                        // Check if link file needs update
+                        if (!local_link_info) {
+                            core.debug(` -> PDF '${drive_path}' missing link file. Marking for update.`);
+                            needs_processing = true;
+                            reason = "missing link file";
+                        }
+                        else if (match_link_key) {
+                            found_local_keys.add(match_link_key);
+                            try {
+                                const link_content = await fs.promises.readFile(match_link_key, "utf-8");
+                                const link_data = JSON.parse(link_content);
+                                const stored_modified_time = link_data.modifiedTime;
+                                const drive_modified_time = drive_item.modifiedTime;
+                                if (!stored_modified_time || !drive_modified_time) {
+                                    core.debug(` -> PDF '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
+                                    needs_processing = true;
+                                    reason = "missing modifiedTime data";
+                                }
+                                else if (stored_modified_time !== drive_modified_time) {
+                                    core.debug(` -> PDF '${drive_path}' link file modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time}). Marking for update.`);
+                                    needs_processing = true;
+                                    reason = `modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
+                                }
+                                else {
+                                    core.debug(` -> PDF '${drive_path}' link file modifiedTime matches. No update needed.`);
+                                }
+                            }
+                            catch (error) {
+                                core.warning(`Failed to read or parse link file '${match_link_key}': ${error.message}. Marking for update.`);
+                                needs_processing = true;
+                                reason = "failed to parse link file";
+                            }
+                        }
+                    }
                 }
             }
             else {
-                // For non-Google Docs (binary/downloadable files), we expect ONLY the content file.
-                // Link files (.gdrive.json) are only for Google Docs.
-                let reason = "";
+                // Other binary files: Expect only content file, no .gdrive.json
                 if (!local_content_info) {
-                    // Content file doesn't exist locally. This is a new file or a modified file where local was deleted.
-                    reason = "missing local content file";
-                    needs_processing = true;
                     core.debug(` -> Binary file '${drive_path}' is NEW or missing locally.`);
+                    needs_processing = true;
+                    reason = "missing content file";
                 }
                 else {
-                    // Content file exists locally. Check hash.
                     if (match_content_key)
-                        found_local_keys.add(match_content_key); // Mark content file as found
+                        found_local_keys.add(match_content_key);
                     if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
-                        // Hash mismatch indicates modification.
-                        reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
-                        needs_processing = true;
                         core.debug(` -> Binary file '${drive_path}' has hash mismatch.`);
+                        needs_processing = true;
+                        reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
                     }
                     else if (!drive_item.hash) {
-                        // Drive item missing hash. We cannot reliably compare, treat as modified to ensure it's downloaded.
-                        reason = "Drive item missing hash";
-                        needs_processing = true;
                         core.debug(` -> Binary file '${drive_path}' in Drive is missing hash. Treating as modified.`);
+                        needs_processing = true;
+                        reason = "Drive item missing hash";
                     }
                     else {
-                        // Content file exists and hash matches (or Drive hash missing but we already handled that)
-                        core.debug(` -> Binary file '${drive_path}' matches local state based on hash or existence.`);
-                        needs_processing = false; // No processing needed if hashes match
+                        core.debug(` -> Binary file '${drive_path}' matches local state based on hash.`);
+                        needs_processing = false;
                     }
                 }
-                // Check for unexpected link file for a binary file
                 if (local_link_info) {
-                    core.warning(`Found unexpected local link file '${match_link_key}' for non-Google Doc '${drive_path}'. This file will be ignored during sync, but might be removed if deleted from Drive.`);
-                    // We add it to found_local_keys so it can be correctly handled by the deletion logic if it disappears from Drive
-                    // Although ideally, it shouldn't exist at all for binary files.
-                    if (match_link_key)
+                    core.warning(`Found unexpected local link file '${match_link_key}' for non-PDF, non-Google Doc '${drive_path}'. Scheduling for deletion.`);
+                    if (match_link_key) {
                         found_local_keys.add(match_link_key);
-                }
-                if (needs_processing) {
-                    core.info(`Change detected for binary file '${drive_path}': ${reason}. Marking for processing.`);
+                        deleted_local_paths.push(match_link_key); // Auto-delete unexpected link files
+                    }
                 }
             }
-            // Add to the correct processing list
             if (needs_processing) {
-                // Check if either expected local file existed to determine if modified or new
+                core.info(`Change detected for ${is_google_doc ? "Google Doc" : needs_link_file ? "PDF" : "binary file"} '${drive_path}': ${reason}. Marking for processing.`);
                 if (local_content_info || local_link_info) {
                     modified_files_to_process.push({ path: drive_path, item: drive_item });
                 }

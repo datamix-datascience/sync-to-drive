@@ -6,7 +6,7 @@ import { drive } from "./auth.js";
 import { DriveItem } from "./types.js";
 // Keep GOOGLE_DOC_MIME_TYPES needed for handle_download_item logic
 // Note: We no longer need anything else from shortcuts.ts for link file creation
-import { GOOGLE_DOC_MIME_TYPES } from "./file_types.js";
+import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES } from "./file_types.js";
 
 // --- Consolidated Helper Function to Create Generic Link Files ---
 /**
@@ -112,27 +112,55 @@ async function download_file_content(file_id: string, local_path: string): Promi
  */
 export async function handle_download_item(
   drive_item: DriveItem,
-  local_path_base: string
-): Promise<{ linkFilePath: string; contentFilePath?: string }> {
-  let linkFilePath: string | null = null;
-  try {
-    // Step 1: Always create the link file using the single, consolidated function
-    linkFilePath = await create_gdrive_link_file(drive_item, local_path_base);
+  target_content_local_path: string
+): Promise<{ linkFilePath?: string; contentFilePath?: string }> {
+  core.debug(`Handling download for Drive item: ${drive_item.name} (ID: ${drive_item.id}, MIME: ${drive_item.mimeType})`);
+  const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
+  const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType || "");
+  let linkFilePath: string | undefined;
+  let contentFilePath: string | undefined;
 
-    // Step 2: Download content *only* if it's not a Google Doc type
-    if (GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "")) {
-      core.info(`File '${drive_item.name}' (ID: ${drive_item.id}) is a Google Doc type. Skipping content download.`);
-      return { linkFilePath }; // Only link file was created
-    } else {
-      core.info(`File '${drive_item.name}' (ID: ${drive_item.id}) is not a Google Doc type. Downloading content.`);
-      await download_file_content(drive_item.id, local_path_base);
-      return { linkFilePath, contentFilePath: local_path_base }; // Both were created/attempted
-    }
-  } catch (error) {
-    core.error(`Failed to handle download/linking for Drive item '${drive_item.name || drive_item.id}': ${(error as Error).message}`);
-    // Rethrow the error, the caller should decide how to proceed
-    throw error;
+  // Create a .gdrive.json link file for Google Docs and PDFs
+  if (needs_link_file) {
+    const link_file_path = `${target_content_local_path}.gdrive.json`;
+    core.info(`Creating/Updating GDrive link file: ${link_file_path} for '${drive_item.name}' (ID: ${drive_item.id})`);
+    const link_data = {
+      id: drive_item.id,
+      mimeType: drive_item.mimeType,
+      name: drive_item.name,
+      modifiedTime: drive_item.modifiedTime
+    };
+    await fs.promises.writeFile(link_file_path, JSON.stringify(link_data, null, 2));
+    linkFilePath = link_file_path;
   }
+
+  // Handle content download
+  if (is_google_doc) {
+    core.info(`File '${drive_item.name}' (ID: ${drive_item.id}) is a Google Doc type. Skipping content download.`);
+  } else {
+    // Download content for PDFs and other binary files
+    core.info(`File '${drive_item.name}' (ID: ${drive_item.id}) is not a Google Doc type. Downloading content.`);
+    try {
+      core.debug(`Downloading Drive file content ID ${drive_item.id} to local path ${target_content_local_path}`);
+      const response = await drive.files.get(
+        { fileId: drive_item.id, alt: "media" },
+        { responseType: "stream" }
+      );
+      const dest = fs.createWriteStream(target_content_local_path);
+      await new Promise<void>((resolve, reject) => {
+        response.data.pipe(dest);
+        dest.on("finish", resolve);
+        dest.on("error", (err) => reject(err));
+      });
+      core.debug(`Successfully downloaded content for file ${drive_item.id} to ${target_content_local_path}`);
+      contentFilePath = target_content_local_path;
+    } catch (error) {
+      core.error(`Failed to download content for ${drive_item.name} (ID: ${drive_item.id}): ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  return { linkFilePath, contentFilePath };
 }
 
 
