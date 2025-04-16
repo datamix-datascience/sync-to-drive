@@ -1,5 +1,5 @@
 import * as core from "@actions/core";
-import { drive } from "./auth";
+import { drive } from "./auth.js";
 // Delete Untracked (Moves to Trash)
 export async function delete_untracked(id, name, is_folder = false) {
     const item_type = is_folder ? "folder" : "file";

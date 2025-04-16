@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
-import { drive, credentials_json } from "./auth";
-import { DrivePermission, DrivePermissionsListResponse, DriveFile } from "./types";
+import { drive, credentials_json } from "./auth.js";
+import { DrivePermission, DrivePermissionsListResponse, DriveFile } from "./types.js";
 
 // Track ownership transfer requests (keep state within this module)
 const ownership_transfer_requested_ids = new Set<string>();

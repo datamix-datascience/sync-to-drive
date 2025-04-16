@@ -2,10 +2,10 @@ import * as core from "@actions/core";
 import * as fs from "fs";
 import * as fs_promises from "fs/promises";
 import * as path from "path";
-import { drive } from "./auth";
+import { drive } from "./auth.js";
 // Keep GOOGLE_DOC_MIME_TYPES needed for handle_download_item logic
 // Note: We no longer need anything else from shortcuts.ts for link file creation
-import { GOOGLE_DOC_MIME_TYPES } from "./file_types";
+import { GOOGLE_DOC_MIME_TYPES } from "./file_types.js";
 // --- Consolidated Helper Function to Create Generic Link Files ---
 /**
  * Creates a .gdrive.json file containing essential Drive metadata.

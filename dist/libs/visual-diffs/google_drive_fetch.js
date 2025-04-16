@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
 import * as fs from 'fs';
 import * as path from 'path';
-import { is_readable_stream, GOOGLE_WORKSPACE_EXPORTABLE_TYPES, NATIVE_PDF_TYPE } from './types';
+import { is_readable_stream, GOOGLE_WORKSPACE_EXPORTABLE_TYPES, NATIVE_PDF_TYPE } from './types.js';
 /**
  * Fetches a file from Google Drive, exporting Google Workspace types to PDF
  * and downloading native PDFs directly. Saves the result to a temporary path.

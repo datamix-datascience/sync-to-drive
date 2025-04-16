@@ -3,8 +3,8 @@ import * as fs_promises from "fs/promises";
 import * as fs from "fs";
 import * as path from "path";
 import { glob } from "glob";
-import { compute_hash } from "./hash";
-import { config } from "../config"; // Import config for ignore patterns
+import { compute_hash } from "./hash.js";
+import { config } from "../config.js"; // Import config for ignore patterns
 // List local files
 export async function list_local_files(root_dir) {
     const files = [];

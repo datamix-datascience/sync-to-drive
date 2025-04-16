@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
-import { drive, credentials_json } from "./auth";
-import { DriveItem, DriveFile, DriveFilesListResponse, DrivePermission, DrivePermissionsListResponse } from "./types";
+import { drive, credentials_json } from "./auth.js";
+import { DriveItem, DriveFile, DriveFilesListResponse, DrivePermission, DrivePermissionsListResponse } from "./types.js";
 import * as path from "path";
 
 // List Drive Files Recursively

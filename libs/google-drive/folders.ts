@@ -1,7 +1,7 @@
 import * as core from "@actions/core";
-import { drive } from "./auth";
-import { DriveItem, DriveFilesListResponse } from "./types";
-import { FileInfo } from "../local-files/types";
+import { drive } from "./auth.js";
+import { DriveItem, DriveFilesListResponse } from "./types.js";
+import { FileInfo } from "../local-files/types.js";
 import * as path from "path";
 
 // Ensure Folder

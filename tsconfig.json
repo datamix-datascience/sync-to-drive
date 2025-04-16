@@ -2,8 +2,10 @@
   "extends": "@tsconfig/node20/tsconfig.json",
   "compilerOptions": {
     "outDir": "dist",
-    "module": "preserve",
-    "moduleResolution": "bundler"
+    "module": "NodeNext", // Use Node.js ESM module system
+    "moduleResolution": "NodeNext", // Use Node.js ESM resolution (includes .js extensions)
+    "target": "ES2022", // Ensure modern JS features
+    "strict": true
   },
   "exclude": [
     "node_modules",

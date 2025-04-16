@@ -3,9 +3,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { Buffer } from 'buffer';
-import { execute_git } from '../git'; // Use existing git helper
-import { convert_pdf_to_pngs } from './pdf_converter';
-import { fetch_drive_file_as_pdf } from './google_drive_fetch';
+import { execute_git } from '../git.js'; // Use existing git helper
+import { convert_pdf_to_pngs } from './pdf_converter.js';
+import { fetch_drive_file_as_pdf } from './google_drive_fetch.js';
 const SKIP_CI_TAG = '[skip visual-diff]'; // Specific tag for this step
 /**
  * Checks the latest commit message on the specified branch for a skip tag.

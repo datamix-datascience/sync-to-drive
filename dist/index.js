@@ -2,18 +2,18 @@ import * as core from "@actions/core";
 import * as path from "path";
 import * as github from '@actions/github'; // Need this for context
 // Lib Imports
-import { config } from "./libs/config"; // Load config first
-import { credentials_json, drive } from "./libs/google-drive/auth"; // Needed for ownership check + drive client
-import { octokit } from "./libs/github/auth"; // Get initialized octokit
-import { list_local_files } from "./libs/local-files/list";
-import { list_drive_files_recursively } from "./libs/google-drive/list";
-import { build_folder_structure } from "./libs/google-drive/folders";
-import { upload_file } from "./libs/google-drive/files";
-import { delete_untracked } from "./libs/google-drive/delete";
-import { request_ownership_transfer, accept_ownership_transfers } from "./libs/google-drive/ownership";
-import { handle_drive_changes } from "./libs/sync-logic/handle-drive-changes";
-import { GOOGLE_DOC_MIME_TYPES } from "./libs/google-drive/file_types";
-import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visual_diffs';
+import { config } from "./libs/config.js"; // Load config first
+import { credentials_json, drive } from "./libs/google-drive/auth.js"; // Needed for ownership check + drive client
+import { octokit } from "./libs/github/auth.js"; // Get initialized octokit
+import { list_local_files } from "./libs/local-files/list.js";
+import { list_drive_files_recursively } from "./libs/google-drive/list.js";
+import { build_folder_structure } from "./libs/google-drive/folders.js";
+import { upload_file } from "./libs/google-drive/files.js";
+import { delete_untracked } from "./libs/google-drive/delete.js";
+import { request_ownership_transfer, accept_ownership_transfers } from "./libs/google-drive/ownership.js";
+import { handle_drive_changes } from "./libs/sync-logic/handle-drive-changes.js";
+import { GOOGLE_DOC_MIME_TYPES } from "./libs/google-drive/file_types.js";
+import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visual_diffs.js';
 // --- Get Inputs ---
 const trigger_event_name = core.getInput('trigger_event_name', { required: true });
 // Inputs for visual diff generation

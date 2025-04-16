@@ -6,7 +6,7 @@ import {
   is_readable_stream,
   GOOGLE_WORKSPACE_EXPORTABLE_TYPES,
   NATIVE_PDF_TYPE
-} from './types';
+} from './types.js';
 
 /**
  * Fetches a file from Google Drive, exporting Google Workspace types to PDF

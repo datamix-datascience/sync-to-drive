@@ -1,5 +1,5 @@
 import * as core from "@actions/core";
-import { drive } from "./auth";
+import { drive } from "./auth.js";
 import * as path from "path";
 // Ensure Folder
 async function ensure_folder(parent_id, folder_name) {

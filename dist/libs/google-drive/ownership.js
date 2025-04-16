@@ -1,5 +1,5 @@
 import * as core from "@actions/core";
-import { drive, credentials_json } from "./auth";
+import { drive, credentials_json } from "./auth.js";
 // Track ownership transfer requests (keep state within this module)
 const ownership_transfer_requested_ids = new Set();
 export function has_pending_transfer_request(file_id) {

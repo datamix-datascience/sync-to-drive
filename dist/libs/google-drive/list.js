@@ -1,5 +1,5 @@
 import * as core from "@actions/core";
-import { drive, credentials_json } from "./auth";
+import { drive, credentials_json } from "./auth.js";
 import * as path from "path";
 // List Drive Files Recursively
 export async function list_drive_files_recursively(folder_id, base_path = "") {

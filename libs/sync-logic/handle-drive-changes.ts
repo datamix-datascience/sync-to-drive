@@ -1,15 +1,14 @@
 import * as core from "@actions/core";
 import * as path from "path";
 import * as fs from "fs"; // Need fs.promises
-import { execute_git } from "../git";
-import { list_local_files } from "../local-files/list";
-import { list_drive_files_recursively } from "../google-drive/list";
-import { handle_download_item } from "../google-drive/files";
-import { create_pull_request_with_retry } from "../github/pull-requests";
-import { octokit } from "../github/auth"; // Get the initialized octokit instance
-import { DriveItem } from "../google-drive/types";
-import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "../google-drive/file_types";
-import { FileInfo } from "../local-files/types";
+import { execute_git } from "../git.js";
+import { list_local_files } from "../local-files/list.js";
+import { list_drive_files_recursively } from "../google-drive/list.js";
+import { handle_download_item } from "../google-drive/files.js";
+import { create_pull_request_with_retry } from "../github/pull-requests.js";
+import { octokit } from "../github/auth.js"; // Get the initialized octokit instance
+import { DriveItem } from "../google-drive/types.js";
+import { GOOGLE_DOC_MIME_TYPES } from "../google-drive/file_types.js";
 
 // Define a return type for the function
 interface HandleDriveChangesResult {
