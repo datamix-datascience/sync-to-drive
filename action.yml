@@ -19,7 +19,7 @@ inputs:
   visual_diff_output_dir:
     description: "Directory (relative to repo root) where generated PNGs will be stored."
     required: false
-    default: "visual-diff-output"
+    default: "_diff_"
   visual_diff_link_suffix:
     description: "The file extension suffix used for Google Drive link files (must match generation)."
     required: false
@@ -27,7 +27,7 @@ inputs:
   visual_diff_dpi:
     description: "Resolution (DPI) for the generated PNG images."
     required: false
-    default: "150"
+    default: "72"
   git_user_name:
     description: "Git user name for commits made by the action (e.g., visual diff PNGs)."
     required: false

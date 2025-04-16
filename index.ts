@@ -21,9 +21,9 @@ import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visua
 const trigger_event_name = core.getInput('trigger_event_name', { required: true });
 // Inputs for visual diff generation
 const enable_visual_diffs = core.getBooleanInput('enable_visual_diffs', { required: false });
-const visual_diff_output_dir = core.getInput('visual_diff_output_dir', { required: false }) || 'visual-diff-output'; // Default directory
+const visual_diff_output_dir = core.getInput('visual_diff_output_dir', { required: false }) || '_diff_'; // Default directory
 const visual_diff_link_suffix = core.getInput('visual_diff_link_suffix', { required: false }) || '.gdrive.json'; // Default suffix matching our creation logic
-const visual_diff_dpi = parseInt(core.getInput('visual_diff_dpi', { required: false }) || '150', 10); // Default DPI
+const visual_diff_dpi = parseInt(core.getInput('visual_diff_dpi', { required: false }) || '72', 10); // Default DPI
 const git_user_name = core.getInput('git_user_name', { required: false }) || 'github-actions[bot]';
 const git_user_email = core.getInput('git_user_email', { required: false }) || 'github-actions[bot]@users.noreply.github.com';
 
