@@ -175,7 +175,7 @@ To contribute or modify the action:
 
 1.  Clone the `sync-to-drive` repository.
 2.  Install dependencies: `npm install`.
-3.  Edit TypeScript source files (e.g., `src/sync_to_drive.ts`, `src/libs/**/*.ts`).
+3.  Edit TypeScript source files (e.g., `src/index.ts`, `src/libs/**/*.ts`).
 4.  Build the JavaScript distribution: `npm run build`.
 5.  Test changes (e.g., point a test workflow to your fork/branch).
 6.  Commit, push, and tag a new release:

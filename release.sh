@@ -14,7 +14,7 @@ command -v npm >/dev/null 2>&1 || { echo "Error: npm is required but not install
 command -v git >/dev/null 2>&1 || { echo "Error: git is required but not installed."; exit 1; }
 
 # Build the TypeScript code into dist with bundling
-echo "Building sync_to_drive.ts to dist/ with esbuild..."
+echo "Building index.ts to dist/ with esbuild..."
 npm install
 npm run build
 
@@ -25,8 +25,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # Ensure dist folder exists and has the compiled file
-if [ ! -f "dist/sync_to_drive.js" ]; then
-  echo "Error: dist/sync_to_drive.js not found after build."
+if [ ! -f "dist/index.js" ]; then
+  echo "Error: dist/index.js not found after build."
   exit 1
 fi
 

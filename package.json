@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "scripts": {
-    "build": "ncc build sync_to_drive.ts -o dist",
-    "start": "ts-node sync_to_drive.ts"
+    "build": "ncc build index.ts -o dist",
+    "start": "ts-node index.ts"
   },
   "dependencies": {
     "@actions/core": "^1.11.1",
