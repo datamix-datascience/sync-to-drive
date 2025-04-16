@@ -5,10 +5,6 @@
     "module": "preserve",
     "moduleResolution": "bundler"
   },
-  "include": [
-    "index.ts",
-    "libs/**/*"
-  ],
   "exclude": [
     "node_modules",
   ]

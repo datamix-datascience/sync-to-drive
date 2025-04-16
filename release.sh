@@ -14,7 +14,7 @@ command -v npm >/dev/null 2>&1 || { echo "Error: npm is required but not install
 command -v git >/dev/null 2>&1 || { echo "Error: git is required but not installed."; exit 1; }
 
 # Build the TypeScript code into dist with bundling
-echo "Building index.ts to dist/ with esbuild..."
+echo "Building index.ts to dist..."
 npm install
 npm run build
 
