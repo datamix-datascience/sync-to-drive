@@ -3,7 +3,7 @@ const path = require("path");
 
 try {
   console.log("Installing additional dependencies...");
-  execSync("npm install @actions/exec @octokit/rest", {
+  execSync("npm install mupdf", {
     stdio: "inherit",
     cwd: path.resolve(__dirname),
   });

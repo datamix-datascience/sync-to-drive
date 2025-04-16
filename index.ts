@@ -1,5 +1,3 @@
-const __dirname = path.dirname(".");
-
 import * as core from "@actions/core";
 import * as path from "path";
 import * as github from '@actions/github'; // Need this for context
@@ -15,11 +13,9 @@ import { upload_file } from "./libs/google-drive/files";
 import { delete_untracked } from "./libs/google-drive/delete";
 import { request_ownership_transfer, accept_ownership_transfers } from "./libs/google-drive/ownership";
 import { handle_drive_changes } from "./libs/sync-logic/handle-drive-changes";
-import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "./libs/google-drive/file_types";
+import { GOOGLE_DOC_MIME_TYPES } from "./libs/google-drive/file_types";
 import { DriveItem } from "./libs/google-drive/types";
-// Import the new visual diff generator
 import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visual_diffs';
-
 
 // --- Get Inputs ---
 const trigger_event_name = core.getInput('trigger_event_name', { required: true });
@@ -30,7 +26,6 @@ const visual_diff_link_suffix = core.getInput('visual_diff_link_suffix', { requi
 const visual_diff_dpi = parseInt(core.getInput('visual_diff_dpi', { required: false }) || '150', 10); // Default DPI
 const git_user_name = core.getInput('git_user_name', { required: false }) || 'github-actions[bot]';
 const git_user_email = core.getInput('git_user_email', { required: false }) || 'github-actions[bot]@users.noreply.github.com';
-
 
 // *** Main sync function ***
 async function sync_main() {
@@ -305,14 +300,14 @@ async function sync_main() {
             drive,
             pr_number: pr_details.pr_number,
             head_branch: pr_details.head_branch,
-            head_sha: head_sha,
+            head_sha,
             owner,
             repo,
             output_base_dir: visual_diff_output_dir,
             link_file_suffix: visual_diff_link_suffix,
             resolution_dpi: visual_diff_dpi,
-            git_user_name: git_user_name,
-            git_user_email: git_user_email,
+            git_user_name,
+            git_user_email,
           });
         } catch (diffError) {
           core.error(`Visual diff generation failed: ${(diffError as Error).message}`);

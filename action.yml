@@ -38,5 +38,6 @@ inputs:
     default: "github-actions[bot]@users.noreply.github.com"
 
 runs:
-  using: "node16" # Or node20
+  using: "node16"
+  pre: "setup.js"
   main: "dist/index.js"
