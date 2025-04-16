@@ -1,54 +1,19 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-const core = __importStar(require("@actions/core"));
-const path = __importStar(require("path"));
-const github = __importStar(require("@actions/github")); // Need this for context
+import * as core from "@actions/core";
+import * as path from "path";
+import * as github from '@actions/github'; // Need this for context
 // Lib Imports
-const config_1 = require("./libs/config"); // Load config first
-const auth_1 = require("./libs/google-drive/auth"); // Needed for ownership check + drive client
-const auth_2 = require("./libs/github/auth"); // Get initialized octokit
-const list_1 = require("./libs/local-files/list");
-const list_2 = require("./libs/google-drive/list");
-const folders_1 = require("./libs/google-drive/folders");
-const files_1 = require("./libs/google-drive/files");
-const delete_1 = require("./libs/google-drive/delete");
-const ownership_1 = require("./libs/google-drive/ownership");
-const handle_drive_changes_1 = require("./libs/sync-logic/handle-drive-changes");
-const file_types_1 = require("./libs/google-drive/file_types");
-const generate_visual_diffs_1 = require("./libs/visual-diffs/generate_visual_diffs");
+import { config } from "./libs/config"; // Load config first
+import { credentials_json, drive } from "./libs/google-drive/auth"; // Needed for ownership check + drive client
+import { octokit } from "./libs/github/auth"; // Get initialized octokit
+import { list_local_files } from "./libs/local-files/list";
+import { list_drive_files_recursively } from "./libs/google-drive/list";
+import { build_folder_structure } from "./libs/google-drive/folders";
+import { upload_file } from "./libs/google-drive/files";
+import { delete_untracked } from "./libs/google-drive/delete";
+import { request_ownership_transfer, accept_ownership_transfers } from "./libs/google-drive/ownership";
+import { handle_drive_changes } from "./libs/sync-logic/handle-drive-changes";
+import { GOOGLE_DOC_MIME_TYPES } from "./libs/google-drive/file_types";
+import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visual_diffs';
 // --- Get Inputs ---
 const trigger_event_name = core.getInput('trigger_event_name', { required: true });
 // Inputs for visual diff generation
@@ -81,7 +46,7 @@ async function sync_main() {
         }
         core.info(`Visual Diff Settings: Output Dir='${visual_diff_output_dir}', Link Suffix='${visual_diff_link_suffix}', DPI=${visual_diff_dpi}`);
     }
-    for (const target of config_1.config.targets.forks) {
+    for (const target of config.targets.forks) {
         const folder_id = target.drive_folder_id;
         const on_untrack_action = target.on_untrack || "ignore";
         core.startGroup(`Processing Target Drive Folder: ${folder_id} (Untrack Action: ${on_untrack_action})`);
@@ -95,14 +60,14 @@ async function sync_main() {
                 core.info("Step 1: Processing outgoing changes (local -> Drive) triggered by 'push' event...");
                 // --- List current local state and Drive state ---
                 core.info("Listing current local files for outgoing sync...");
-                const current_local_files = await (0, list_1.list_local_files)(".");
+                const current_local_files = await list_local_files(".");
                 const current_local_map = new Map(current_local_files.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
                 core.info(`Found ${current_local_map.size} local files for outgoing sync.`);
                 core.info("Listing current Drive content for outgoing sync comparison...");
                 let drive_files_map_outgoing;
                 let drive_folders_map_outgoing;
                 try {
-                    const drive_data_outgoing = await (0, list_2.list_drive_files_recursively)(folder_id);
+                    const drive_data_outgoing = await list_drive_files_recursively(folder_id);
                     drive_files_map_outgoing = new Map(Array.from(drive_data_outgoing.files.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
                     drive_folders_map_outgoing = new Map(Array.from(drive_data_outgoing.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
                     core.info(`Drive state: ${drive_files_map_outgoing.size} files, ${drive_folders_map_outgoing.size} folders.`);
@@ -117,7 +82,7 @@ async function sync_main() {
                 core.info("Ensuring Drive folder structure matches local structure...");
                 let folder_path_to_id_map;
                 try {
-                    folder_path_to_id_map = await (0, folders_1.build_folder_structure)(folder_id, current_local_files, drive_folders_map_outgoing);
+                    folder_path_to_id_map = await build_folder_structure(folder_id, current_local_files, drive_folders_map_outgoing);
                 }
                 catch (structureError) {
                     core.error(`Failed to build Drive folder structure: ${structureError.message}. Skipping file uploads/updates.`);
@@ -154,18 +119,18 @@ async function sync_main() {
                     // --- Upload/Update Logic ---
                     if (!existing_drive_file) {
                         core.info(`New file detected locally: '${local_relative_path}'. Uploading to Drive folder ${target_folder_id}.`);
-                        await (0, files_1.upload_file)(local_file.path, target_folder_id);
+                        await upload_file(local_file.path, target_folder_id);
                     }
                     else {
                         // Compare hash and name for regular files
-                        if (file_types_1.GOOGLE_DOC_MIME_TYPES.includes(existing_drive_file.mimeType || '')) {
+                        if (GOOGLE_DOC_MIME_TYPES.includes(existing_drive_file.mimeType || '')) {
                             // If the Drive file is a Google Doc, we don't compare hashes.
                             // Check only if the name needs updating based on the local path.
                             core.debug(` -> Drive file ${existing_drive_file.id} is a Google Doc type.`);
                             if (existing_drive_file.name !== drive_target_name) {
                                 core.info(`Local path implies Drive file name should be '${drive_target_name}', but it is '${existing_drive_file.name}'. Renaming Drive file (ID: ${existing_drive_file.id}).`);
                                 try {
-                                    await auth_1.drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
+                                    await drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
                                 }
                                 catch (renameError) {
                                     core.warning(`Failed to rename Drive Google Doc ${existing_drive_file.id}: ${renameError.message}`);
@@ -181,12 +146,12 @@ async function sync_main() {
                             const drive_file_needs_rename = (existing_drive_file.name !== drive_target_name);
                             if (drive_file_needs_update) {
                                 core.info(`Local file '${local_relative_path}' is newer (hash mismatch or Drive hash missing). Updating Drive file (ID: ${existing_drive_file.id}).`);
-                                await (0, files_1.upload_file)(local_file.path, target_folder_id, { id: existing_drive_file.id, name: existing_drive_file.name });
+                                await upload_file(local_file.path, target_folder_id, { id: existing_drive_file.id, name: existing_drive_file.name });
                             }
                             else if (drive_file_needs_rename) {
                                 core.info(`File content matches, but name differs for '${local_relative_path}'. Renaming Drive file '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}).`);
                                 try {
-                                    await auth_1.drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
+                                    await drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
                                 }
                                 catch (renameError) {
                                     core.warning(`Failed to rename Drive file ${existing_drive_file.id}: ${renameError.message}`);
@@ -203,7 +168,7 @@ async function sync_main() {
                 // Re-list Drive content *after* potential uploads/renames
                 core.info("Re-listing Drive content after outgoing sync for untracked check...");
                 try {
-                    const drive_data_after_sync = await (0, list_2.list_drive_files_recursively)(folder_id);
+                    const drive_data_after_sync = await list_drive_files_recursively(folder_id);
                     drive_files_map_outgoing = new Map(Array.from(drive_data_after_sync.files.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
                     drive_folders_map_outgoing = new Map(Array.from(drive_data_after_sync.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
                     core.info(`Drive state after sync: ${drive_files_map_outgoing.size} files, ${drive_folders_map_outgoing.size} folders.`);
@@ -240,8 +205,8 @@ async function sync_main() {
                                 const owner_info = untracked_item.permissions?.find(p => p.role === 'owner');
                                 const current_owner_email = owner_info?.emailAddress;
                                 core.warning(`Untracked item '${untracked_path}' (ID: ${untracked_item.id}) is not owned by the service account (Owner: ${current_owner_email || 'unknown'}).`);
-                                if (on_untrack_action === 'request' && current_owner_email && current_owner_email !== auth_1.credentials_json.client_email) {
-                                    await (0, ownership_1.request_ownership_transfer)(untracked_item.id, current_owner_email);
+                                if (on_untrack_action === 'request' && current_owner_email && current_owner_email !== credentials_json.client_email) {
+                                    await request_ownership_transfer(untracked_item.id, current_owner_email);
                                 }
                                 else if (on_untrack_action === 'remove') {
                                     core.warning(`Cannot remove '${untracked_path}' because it's not owned by the service account. Skipping removal.`);
@@ -253,7 +218,7 @@ async function sync_main() {
                             else {
                                 core.info(`Untracked item '${untracked_path}' is owned by the service account.`);
                                 if (on_untrack_action === "remove") {
-                                    await (0, delete_1.delete_untracked)(untracked_item.id, untracked_path, isFolder);
+                                    await delete_untracked(untracked_item.id, untracked_path, isFolder);
                                 }
                                 else if (on_untrack_action === "request") {
                                     core.info(`Untracked item '${untracked_path}' is already owned. No action needed for 'request'.`);
@@ -273,7 +238,7 @@ async function sync_main() {
             // Always run this, regardless of trigger event
             core.info("Step 3: Checking for and accepting pending ownership transfers...");
             try {
-                await (0, ownership_1.accept_ownership_transfers)(folder_id); // Start recursive check from root
+                await accept_ownership_transfers(folder_id); // Start recursive check from root
             }
             catch (acceptError) {
                 // Log error but continue if possible
@@ -286,7 +251,7 @@ async function sync_main() {
                 core.info("Step 4: Handling potential incoming changes from Drive (Drive -> Local PR)...");
                 // Pass the original trigger event name and the untrack action config
                 // Store the result which might contain PR details
-                pr_details = await (0, handle_drive_changes_1.handle_drive_changes)(folder_id, on_untrack_action, trigger_event_name);
+                pr_details = await handle_drive_changes(folder_id, on_untrack_action, trigger_event_name);
             }
             else {
                 core.warning("Skipping Step 4 (Incoming Changes Check) due to failures in previous steps.");
@@ -300,21 +265,21 @@ async function sync_main() {
                     if (!head_sha && github.context.eventName === 'pull_request') {
                         core.warning("Could not get head SHA directly from PR payload context. Trying to fetch...");
                         // Attempt to fetch the head SHA if running in a different context or payload is minimal
-                        const pr_data = await auth_2.octokit.rest.pulls.get({ owner, repo, pull_number: pr_details.pr_number });
+                        const pr_data = await octokit.rest.pulls.get({ owner, repo, pull_number: pr_details.pr_number });
                         head_sha = pr_data.data.head.sha;
                     }
                     if (!head_sha) {
                         // Final attempt: get ref and then SHA
-                        const ref_data = await auth_2.octokit.rest.git.getRef({ owner, repo, ref: `heads/${pr_details.head_branch}` });
+                        const ref_data = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${pr_details.head_branch}` });
                         head_sha = ref_data.data.object.sha;
                     }
                     if (!head_sha) {
                         throw new Error(`Could not determine head SHA for branch ${pr_details.head_branch}`);
                     }
                     core.info(`Using head SHA ${head_sha} for visual diff source.`);
-                    await (0, generate_visual_diffs_1.generate_visual_diffs_for_pr)({
-                        octokit: auth_2.octokit,
-                        drive: auth_1.drive,
+                    await generate_visual_diffs_for_pr({
+                        octokit,
+                        drive,
                         pr_number: pr_details.pr_number,
                         head_branch: pr_details.head_branch,
                         head_sha,

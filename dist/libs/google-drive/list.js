@@ -1,44 +1,8 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.list_drive_files_recursively = list_drive_files_recursively;
-const core = __importStar(require("@actions/core"));
-const auth_1 = require("./auth");
-const path = __importStar(require("path"));
+import * as core from "@actions/core";
+import { drive, credentials_json } from "./auth";
+import * as path from "path";
 // List Drive Files Recursively
-async function list_drive_files_recursively(folder_id, base_path = "") {
+export async function list_drive_files_recursively(folder_id, base_path = "") {
     const file_map = new Map();
     const folder_map = new Map();
     let all_items = [];
@@ -46,7 +10,7 @@ async function list_drive_files_recursively(folder_id, base_path = "") {
     core.info(`Listing items in Drive folder ID: ${folder_id} (relative path: '${base_path || '/'}')`);
     try {
         do {
-            const res = await auth_1.drive.files.list({
+            const res = await drive.files.list({
                 q: `'${folder_id}' in parents and trashed = false`,
                 fields: "nextPageToken, files(id, name, mimeType, md5Checksum, owners(emailAddress))",
                 spaces: "drive",
@@ -63,7 +27,7 @@ async function list_drive_files_recursively(folder_id, base_path = "") {
         throw error;
     }
     core.info(`Processing ${all_items.length} items found in folder ID: ${folder_id}`);
-    const service_account_email = auth_1.credentials_json.client_email;
+    const service_account_email = credentials_json.client_email;
     for (const item of all_items) {
         if (!item.name || !item.id) {
             core.warning(`Skipping item with missing name or ID in folder ${folder_id}. Data: ${JSON.stringify(item)}`);
@@ -73,7 +37,7 @@ async function list_drive_files_recursively(folder_id, base_path = "") {
         const owned = item.owners?.some(owner => owner.emailAddress === service_account_email) || false;
         let permissions = [];
         try {
-            const perm_res = await auth_1.drive.permissions.list({
+            const perm_res = await drive.permissions.list({
                 fileId: item.id,
                 fields: "permissions(id, role, emailAddress, pendingOwner)",
             });

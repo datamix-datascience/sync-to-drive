@@ -1,47 +1,11 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.generate_visual_diffs_for_pr = generate_visual_diffs_for_pr;
-const core = __importStar(require("@actions/core"));
-const path = __importStar(require("path"));
-const fs = __importStar(require("fs"));
-const os = __importStar(require("os"));
-const buffer_1 = require("buffer");
-const git_1 = require("../git"); // Use existing git helper
-const pdf_converter_1 = require("./pdf_converter");
-const google_drive_fetch_1 = require("./google_drive_fetch");
+import * as core from '@actions/core';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+import { Buffer } from 'buffer';
+import { execute_git } from '../git'; // Use existing git helper
+import { convert_pdf_to_pngs } from './pdf_converter';
+import { fetch_drive_file_as_pdf } from './google_drive_fetch';
 const SKIP_CI_TAG = '[skip visual-diff]'; // Specific tag for this step
 /**
  * Checks the latest commit message on the specified branch for a skip tag.
@@ -53,9 +17,9 @@ async function should_skip_generation(branch_name) {
         // For simplicity, assume the calling context ensures the correct branch is checked out or reachable.
         // Fetch latest changes for the branch first
         core.info(`Fetching latest updates for branch ${branch_name}...`);
-        await (0, git_1.execute_git)('fetch', ['origin', branch_name], { silent: true });
+        await execute_git('fetch', ['origin', branch_name], { silent: true });
         // Get the commit message of the most recent commit on the *remote* branch ref
-        const latest_commit_message_result = await (0, git_1.execute_git)('log', ['-1', '--pretty=%B', `origin/${branch_name}`], // Check the remote ref head
+        const latest_commit_message_result = await execute_git('log', ['-1', '--pretty=%B', `origin/${branch_name}`], // Check the remote ref head
         { silent: true, ignoreReturnCode: true } // Ignore errors if branch hasn't been pushed?
         );
         if (latest_commit_message_result.exitCode !== 0 || !latest_commit_message_result.stdout) {
@@ -90,13 +54,13 @@ async function commit_and_push_pngs(params, commit_message) {
     core.startGroup('Committing and Pushing PNGs');
     try {
         // Configure Git user (might be redundant if done globally, but safe)
-        await (0, git_1.execute_git)("config", ["--local", "user.email", params.git_user_email]);
-        await (0, git_1.execute_git)("config", ["--local", "user.name", params.git_user_name]);
+        await execute_git("config", ["--local", "user.email", params.git_user_email]);
+        await execute_git("config", ["--local", "user.name", params.git_user_name]);
         core.info(`Adding generated files in '${params.output_base_dir}' to Git index...`);
         // Add only the specific output directory
-        await (0, git_1.execute_git)('add', [params.output_base_dir]);
+        await execute_git('add', [params.output_base_dir]);
         // Check if there are staged changes *within* the target directory
-        const status_result = await (0, git_1.execute_git)('status', ['--porcelain', '--', params.output_base_dir], { ignoreReturnCode: true } // Don't fail if no changes
+        const status_result = await execute_git('status', ['--porcelain', '--', params.output_base_dir], { ignoreReturnCode: true } // Don't fail if no changes
         );
         if (!status_result.stdout.trim()) {
             core.info(`No staged changes detected within '${params.output_base_dir}'. Nothing to commit.`);
@@ -105,10 +69,10 @@ async function commit_and_push_pngs(params, commit_message) {
         }
         core.debug("Staged changes detected:\n" + status_result.stdout);
         core.info('Committing changes...');
-        await (0, git_1.execute_git)('commit', ['-m', commit_message]);
+        await execute_git('commit', ['-m', commit_message]);
         core.info(`Pushing changes to branch ${params.head_branch}...`);
         // Use --force-with-lease if possible and safer, but simple force for automation is common
-        await (0, git_1.execute_git)('push', ['origin', params.head_branch]);
+        await execute_git('push', ['origin', params.head_branch]);
         core.info('Changes pushed successfully.');
     }
     catch (error) {
@@ -123,7 +87,7 @@ async function commit_and_push_pngs(params, commit_message) {
 /**
  * Main function to generate visual diffs for a Pull Request.
  */
-async function generate_visual_diffs_for_pr(params) {
+export async function generate_visual_diffs_for_pr(params) {
     core.startGroup(`Generating Visual Diffs for PR #${params.pr_number}`);
     core.info(`Repo: ${params.owner}/${params.repo}`);
     core.info(`Branch: ${params.head_branch} (SHA: ${params.head_sha})`);
@@ -212,7 +176,7 @@ async function generate_visual_diffs_for_pr(params) {
             });
             // Type guard to ensure response has content
             if ('content' in content_response && content_response.content && content_response.encoding === 'base64') {
-                const file_content_str = buffer_1.Buffer.from(content_response.content, 'base64').toString('utf-8');
+                const file_content_str = Buffer.from(content_response.content, 'base64').toString('utf-8');
                 const file_data = JSON.parse(file_content_str);
                 if (file_data && typeof file_data.id === 'string' && typeof file_data.mimeType === 'string') {
                     file_id = file_data.id;
@@ -249,7 +213,7 @@ async function generate_visual_diffs_for_pr(params) {
         // Sanitize the original name for use in the temporary file path
         const sanitized_base_name = original_name.replace(/[^a-zA-Z0-9_.-]/g, '_');
         const temp_pdf_path = path.join(temp_dir, `${sanitized_base_name}.pdf`);
-        const fetch_success = await (0, google_drive_fetch_1.fetch_drive_file_as_pdf)(params.drive, file_id, mime_type, temp_pdf_path);
+        const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id, mime_type, temp_pdf_path);
         if (!fetch_success) {
             core.warning(`   - Failed to fetch PDF for ${link_file.path} (Drive ID: ${file_id}). Skipping PNG generation for this file.`);
             continue; // Skip to the next link file
@@ -261,7 +225,7 @@ async function generate_visual_diffs_for_pr(params) {
         const image_output_dir_relative_path = path.join(relative_dir, link_file.base_name);
         const image_output_dir_absolute_path = path.join(params.output_base_dir, image_output_dir_relative_path);
         core.info(`   - Converting PDF to PNGs in directory: ${image_output_dir_absolute_path} (relative: ${image_output_dir_relative_path})`);
-        const generated_pngs = await (0, pdf_converter_1.convert_pdf_to_pngs)(temp_pdf_path, image_output_dir_absolute_path, params.resolution_dpi);
+        const generated_pngs = await convert_pdf_to_pngs(temp_pdf_path, image_output_dir_absolute_path, params.resolution_dpi);
         if (generated_pngs.length > 0) {
             total_pngs_generated += generated_pngs.length;
             processed_files_info.push(`'${link_file.path}' (${generated_pngs.length} pages)`);

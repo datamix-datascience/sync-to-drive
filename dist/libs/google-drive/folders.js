@@ -1,49 +1,13 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.build_folder_structure = build_folder_structure;
-const core = __importStar(require("@actions/core"));
-const auth_1 = require("./auth");
-const path = __importStar(require("path"));
+import * as core from "@actions/core";
+import { drive } from "./auth";
+import * as path from "path";
 // Ensure Folder
 async function ensure_folder(parent_id, folder_name) {
     core.info(`Ensuring folder '${folder_name}' under parent '${parent_id}'`);
     try {
         const query = `'${parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and name = '${folder_name.replace(/'/g, "\\'")}' and trashed = false`;
         core.debug(`Querying for existing folder: ${query}`);
-        const res = await auth_1.drive.files.list({
+        const res = await drive.files.list({
             q: query,
             fields: "files(id, name)",
             spaces: "drive",
@@ -56,7 +20,7 @@ async function ensure_folder(parent_id, folder_name) {
             return existing_folder.id;
         }
         core.info(`Folder '${folder_name}' not found, creating it...`);
-        const folder = await auth_1.drive.files.create({
+        const folder = await drive.files.create({
             requestBody: {
                 name: folder_name,
                 mimeType: "application/vnd.google-apps.folder",
@@ -80,7 +44,7 @@ async function ensure_folder(parent_id, folder_name) {
     }
 }
 // Build Folder Structure
-async function build_folder_structure(root_folder_id, local_files, existing_folders // Pass existing folders for efficiency
+export async function build_folder_structure(root_folder_id, local_files, existing_folders // Pass existing folders for efficiency
 ) {
     const folder_map = new Map();
     folder_map.set("", root_folder_id); // Root path maps to the root folder ID

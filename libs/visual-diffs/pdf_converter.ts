@@ -1,8 +1,6 @@
 import * as core from '@actions/core';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as mupdfjs from 'mupdf/mupdfjs';
-import { ColorSpace } from 'mupdf/mupdfjs';
 
 export async function convert_pdf_to_pngs(
   pdf_file_path: string,
@@ -10,7 +8,8 @@ export async function convert_pdf_to_pngs(
   resolution_dpi: number
 ): Promise<string[]> {
   const generated_files: string[] = [];
-  let doc: mupdfjs.PDFDocument | null = null; // Explicitly type doc
+  const mupdfjs = await import("mupdf");
+  let doc: any | null = null; // Explicitly type doc
 
   try {
     const buffer = await fs.promises.readFile(pdf_file_path);
@@ -26,7 +25,7 @@ export async function convert_pdf_to_pngs(
       const page_number = i + 1;
       core.debug(`   - Processing page ${page_number}...`);
       const page = doc.loadPage(i);
-      const pixmap = page.toPixmap(matrix, ColorSpace.DeviceRGB, false, true);
+      const pixmap = page.toPixmap(matrix, mupdfjs.ColorSpace.DeviceRGB, false, true);
       const png_image_data = pixmap.asPNG(); // Note: Typo in draft, should be asPNG()
       const output_png_path = path.join(output_image_dir, `${String(page_number).padStart(4, '0')}.png`);
 

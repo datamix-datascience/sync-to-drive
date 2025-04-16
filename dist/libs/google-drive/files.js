@@ -1,48 +1,11 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.handle_download_item = handle_download_item;
-exports.upload_file = upload_file;
-const core = __importStar(require("@actions/core"));
-const fs = __importStar(require("fs"));
-const fs_promises = __importStar(require("fs/promises"));
-const path = __importStar(require("path"));
-const auth_1 = require("./auth");
+import * as core from "@actions/core";
+import * as fs from "fs";
+import * as fs_promises from "fs/promises";
+import * as path from "path";
+import { drive } from "./auth";
 // Keep GOOGLE_DOC_MIME_TYPES needed for handle_download_item logic
 // Note: We no longer need anything else from shortcuts.ts for link file creation
-const file_types_1 = require("./file_types");
+import { GOOGLE_DOC_MIME_TYPES } from "./file_types";
 // --- Consolidated Helper Function to Create Generic Link Files ---
 /**
  * Creates a .gdrive.json file containing essential Drive metadata.
@@ -91,7 +54,7 @@ async function download_file_content(file_id, local_path) {
     try {
         const dir = path.dirname(local_path);
         await fs_promises.mkdir(dir, { recursive: true });
-        const res = await auth_1.drive.files.get({ fileId: file_id, alt: "media" }, { responseType: "stream" });
+        const res = await drive.files.get({ fileId: file_id, alt: "media" }, { responseType: "stream" });
         if (!res.data || typeof res.data.pipe !== 'function') {
             throw new Error(`Drive API did not return a readable stream for file ID ${file_id}.`);
         }
@@ -143,13 +106,13 @@ async function download_file_content(file_id, local_path) {
  * @param local_path_base The intended local path for the *content* file.
  * @returns An object containing the paths of the created files.
  */
-async function handle_download_item(drive_item, local_path_base) {
+export async function handle_download_item(drive_item, local_path_base) {
     let linkFilePath = null;
     try {
         // Step 1: Always create the link file using the single, consolidated function
         linkFilePath = await create_gdrive_link_file(drive_item, local_path_base);
         // Step 2: Download content *only* if it's not a Google Doc type
-        if (file_types_1.GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "")) {
+        if (GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "")) {
             core.info(`File '${drive_item.name}' (ID: ${drive_item.id}) is a Google Doc type. Skipping content download.`);
             return { linkFilePath }; // Only link file was created
         }
@@ -174,7 +137,7 @@ async function handle_download_item(drive_item, local_path_base) {
  * @param existing_drive_file Optional info for updating an existing file.
  * @returns Object with the Drive file ID and success status.
  */
-async function upload_file(local_file_path, target_folder_id, existing_drive_file) {
+export async function upload_file(local_file_path, target_folder_id, existing_drive_file) {
     const local_file_name = path.basename(local_file_path);
     // Skip uploading the .gdrive.json files themselves
     if (local_file_name.endsWith('.gdrive.json')) {
@@ -192,7 +155,7 @@ async function upload_file(local_file_path, target_folder_id, existing_drive_fil
                 core.info(`Updating file name for '${existing_drive_file.name}' to '${local_file_name}' (ID: ${fileId})`);
             }
             core.info(`Updating existing file content '${local_file_name}' (ID: ${fileId}) in folder ${target_folder_id}`);
-            const res = await auth_1.drive.files.update({
+            const res = await drive.files.update({
                 fileId: fileId, media: media, requestBody: Object.keys(requestBody).length > 0 ? requestBody : undefined, fields: "id, name, md5Checksum",
             });
             fileId = res.data.id;
@@ -200,7 +163,7 @@ async function upload_file(local_file_path, target_folder_id, existing_drive_fil
         }
         else { // create
             core.info(`Creating new file '${local_file_name}' in folder ${target_folder_id}`);
-            const res = await auth_1.drive.files.create({
+            const res = await drive.files.create({
                 requestBody: { name: local_file_name, parents: [target_folder_id] }, media: media, fields: "id, name, md5Checksum",
             });
             if (!res.data.id) {

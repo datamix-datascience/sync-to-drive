@@ -1,43 +1,7 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.fetch_drive_file_as_pdf = fetch_drive_file_as_pdf;
-const core = __importStar(require("@actions/core"));
-const fs = __importStar(require("fs"));
-const path = __importStar(require("path"));
-const types_1 = require("./types");
+import * as core from '@actions/core';
+import * as fs from 'fs';
+import * as path from 'path';
+import { is_readable_stream, GOOGLE_WORKSPACE_EXPORTABLE_TYPES, NATIVE_PDF_TYPE } from './types';
 /**
  * Fetches a file from Google Drive, exporting Google Workspace types to PDF
  * and downloading native PDFs directly. Saves the result to a temporary path.
@@ -48,24 +12,24 @@ const types_1 = require("./types");
  * @param temp_pdf_path - The local path where the fetched PDF should be saved.
  * @returns Promise<boolean> - True if fetch and save were successful, false otherwise.
  */
-async function fetch_drive_file_as_pdf(drive, file_id, mime_type, temp_pdf_path) {
+export async function fetch_drive_file_as_pdf(drive, file_id, mime_type, temp_pdf_path) {
     core.info(`   - Preparing to fetch content for ID ${file_id} (Type: ${mime_type})`);
     let response_stream = null;
     try {
-        if (types_1.GOOGLE_WORKSPACE_EXPORTABLE_TYPES.includes(mime_type)) {
+        if (GOOGLE_WORKSPACE_EXPORTABLE_TYPES.includes(mime_type)) {
             core.info(`   - Exporting Google Workspace file as PDF...`);
             const response = await drive.files.export({ fileId: file_id, mimeType: 'application/pdf' }, { responseType: 'stream' });
-            if ((0, types_1.is_readable_stream)(response.data)) {
+            if (is_readable_stream(response.data)) {
                 response_stream = response.data;
             }
             else {
                 throw new Error('Drive export did not return a readable stream.');
             }
         }
-        else if (mime_type === types_1.NATIVE_PDF_TYPE) {
+        else if (mime_type === NATIVE_PDF_TYPE) {
             core.info(`   - Downloading native PDF file...`);
             const response = await drive.files.get({ fileId: file_id, alt: 'media' }, { responseType: 'stream' });
-            if ((0, types_1.is_readable_stream)(response.data)) {
+            if (is_readable_stream(response.data)) {
                 response_stream = response.data;
             }
             else {

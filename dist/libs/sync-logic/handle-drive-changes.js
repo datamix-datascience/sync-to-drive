@@ -1,49 +1,13 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.handle_drive_changes = handle_drive_changes;
-const core = __importStar(require("@actions/core"));
-const path = __importStar(require("path"));
-const fs = __importStar(require("fs")); // Need fs.promises
-const git_1 = require("../git");
-const list_1 = require("../local-files/list");
-const list_2 = require("../google-drive/list");
-const files_1 = require("../google-drive/files");
-const pull_requests_1 = require("../github/pull-requests");
-const auth_1 = require("../github/auth"); // Get the initialized octokit instance
-const file_types_1 = require("../google-drive/file_types");
+import * as core from "@actions/core";
+import * as path from "path";
+import * as fs from "fs"; // Need fs.promises
+import { execute_git } from "../git";
+import { list_local_files } from "../local-files/list";
+import { list_drive_files_recursively } from "../google-drive/list";
+import { handle_download_item } from "../google-drive/files";
+import { create_pull_request_with_retry } from "../github/pull-requests";
+import { octokit } from "../github/auth"; // Get the initialized octokit instance
+import { GOOGLE_DOC_MIME_TYPES } from "../google-drive/file_types";
 // Helper to safely get repo owner and name
 function get_repo_info() {
     const repo_full_name = process.env.GITHUB_REPOSITORY;
@@ -62,7 +26,7 @@ async function determineInitialBranch(repo_info) {
     core.info("Determining initial branch name...");
     try {
         // Attempt 1: Git rev-parse
-        const current_branch_result = await (0, git_1.execute_git)('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
+        const current_branch_result = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
         const parsedBranch = current_branch_result.stdout.trim();
         if (parsedBranch && parsedBranch !== 'HEAD') {
             branchName = parsedBranch;
@@ -78,7 +42,7 @@ async function determineInitialBranch(repo_info) {
         }
         // Attempt 3: GitHub API default branch
         core.info("Falling back to fetching default branch from GitHub API...");
-        const repoData = await auth_1.octokit.rest.repos.get({ owner: repo_info.owner, repo: repo_info.repo });
+        const repoData = await octokit.rest.repos.get({ owner: repo_info.owner, repo: repo_info.repo });
         branchName = repoData.data.default_branch;
         if (!branchName) {
             throw new Error("GitHub API did not return a default branch name.");
@@ -93,7 +57,7 @@ async function determineInitialBranch(repo_info) {
     }
 }
 // Handle Drive changes with PR creation
-async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_name) {
+export async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_name) {
     core.info(`Handling potential incoming changes from Drive folder: ${folder_id} (Trigger: ${trigger_event_name}, Untrack action: ${on_untrack_action})`);
     let original_state_branch = ''; // Initialize for finally block safety
     const repo_info = get_repo_info(); // Get repo info early
@@ -108,15 +72,15 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
         // initial_branch is guaranteed to be assigned here.
         original_state_branch = `original-state-${folder_id}-${run_id}`;
         core.info(`Initial branch is '${initial_branch}'. Creating temporary state branch '${original_state_branch}'`);
-        const initial_commit_hash = (await (0, git_1.execute_git)('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
+        const initial_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
         // Ensure the commit hash exists before trying to branch from it
         if (!initial_commit_hash) {
             throw new Error("Could not get initial commit hash.");
         }
-        await (0, git_1.execute_git)("checkout", ["-b", original_state_branch, initial_commit_hash]);
+        await execute_git("checkout", ["-b", original_state_branch, initial_commit_hash]);
         // *** 2. List local files from the state branch ***
         core.info("Listing local files from original state branch...");
-        const local_files_list = await (0, list_1.list_local_files)("."); // List files in the checked-out original state
+        const local_files_list = await list_local_files("."); // List files in the checked-out original state
         const local_map = new Map(local_files_list.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
         core.info(`Found ${local_map.size} relevant local files in original state.`);
         // Case-insensitive lookup map
@@ -130,7 +94,7 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
         let drive_files;
         let drive_folders;
         try {
-            const drive_data = await (0, list_2.list_drive_files_recursively)(folder_id);
+            const drive_data = await list_drive_files_recursively(folder_id);
             drive_files = new Map(Array.from(drive_data.files.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
             drive_folders = new Map(Array.from(drive_data.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
             core.info(`Found ${drive_files.size} files and ${drive_folders.size} folders in Drive.`);
@@ -148,7 +112,7 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
         for (const [drive_path, drive_item] of drive_files) {
             core.debug(`Comparing Drive item: '${drive_path}' (ID: ${drive_item.id})`);
             const drive_path_lower = drive_path.toLowerCase();
-            const is_google_doc = file_types_1.GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
+            const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
             // Define expected local paths
             const expected_content_path = drive_path; // Path for the actual file content (if not GDoc)
             const expected_link_path = `${drive_path}.gdrive.json`; // Path for the link file
@@ -303,7 +267,7 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
                         core.info(`Removing local item: ${local_path_to_delete}`);
                         // Use git rm with recursive flag and force for directories/files
                         // --ignore-unmatch prevents errors if the file is already gone (e.g., deleted manually or by a previous step)
-                        await (0, git_1.execute_git)("rm", ["-rf", "--ignore-unmatch", "--", local_path_to_delete]);
+                        await execute_git("rm", ["-rf", "--ignore-unmatch", "--", local_path_to_delete]);
                         removed_paths_final.add(local_path_to_delete);
                         // If we remove a file, ensure it's not also marked as added/updated
                         added_or_updated_paths_final.delete(local_path_to_delete);
@@ -335,7 +299,7 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
                     await fs.promises.mkdir(local_dir, { recursive: true });
                 }
                 // Handle download/linking - creates link file and potentially content file
-                const { linkFilePath, contentFilePath } = await (0, files_1.handle_download_item)(drive_item, target_content_local_path);
+                const { linkFilePath, contentFilePath } = await handle_download_item(drive_item, target_content_local_path);
                 // Helper to stage files and track changes
                 const stage_file = async (file_path_to_stage) => {
                     if (!file_path_to_stage)
@@ -346,7 +310,7 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
                         return;
                     }
                     core.info(`Staging added/updated file: ${file_path_to_stage}`);
-                    await (0, git_1.execute_git)("add", ["--", file_path_to_stage]);
+                    await execute_git("add", ["--", file_path_to_stage]);
                     added_or_updated_paths_final.add(file_path_to_stage);
                     changes_made = true;
                     // If this file was previously marked for removal, unmark it
@@ -365,7 +329,7 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
         } // End of processing loop
         // *** 7. Commit, Push, and Create PR if changes were made ***
         // Re-check git status after all operations
-        const status_result = await (0, git_1.execute_git)('status', ['--porcelain']);
+        const status_result = await execute_git('status', ['--porcelain']);
         if (!status_result.stdout.trim()) {
             core.info("Git status clean after processing changes. No commit needed.");
             return result; // Return empty result
@@ -395,49 +359,49 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
         commit_messages.push(`Workflow Run ID: ${run_id}`);
         const commit_message = commit_messages.join("\n");
         try {
-            await (0, git_1.execute_git)("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
-            await (0, git_1.execute_git)("config", ["--local", "user.name", "github-actions[bot]"]);
+            await execute_git("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
+            await execute_git("config", ["--local", "user.name", "github-actions[bot]"]);
             core.info("Committing changes on temporary branch...");
-            await (0, git_1.execute_git)("commit", ["-m", commit_message]);
-            const sync_commit_hash = (await (0, git_1.execute_git)('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
+            await execute_git("commit", ["-m", commit_message]);
+            const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
             core.info(`Created sync commit ${sync_commit_hash} on temporary branch '${original_state_branch}'.`);
             // --- Prepare PR Branch ---
             const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
             const head_branch = `sync-from-drive-${sanitized_folder_id}`;
             core.info(`Preparing PR branch: ${head_branch}`);
             // Check existence of local and remote branch
-            const local_branch_exists_check = await (0, git_1.execute_git)('show-ref', ['--verify', `refs/heads/${head_branch}`], { ignoreReturnCode: true, silent: true });
-            const remote_branch_exists_check = await (0, git_1.execute_git)('ls-remote', ['--exit-code', '--heads', 'origin', head_branch], { ignoreReturnCode: true, silent: true });
+            const local_branch_exists_check = await execute_git('show-ref', ['--verify', `refs/heads/${head_branch}`], { ignoreReturnCode: true, silent: true });
+            const remote_branch_exists_check = await execute_git('ls-remote', ['--exit-code', '--heads', 'origin', head_branch], { ignoreReturnCode: true, silent: true });
             const local_branch_exists = local_branch_exists_check.exitCode === 0;
             const remote_branch_exists = remote_branch_exists_check.exitCode === 0;
             // Create or checkout the head branch pointing to the temporary commit
             if (local_branch_exists) {
                 core.info(`Branch ${head_branch} exists locally. Checking it out...`);
-                await (0, git_1.execute_git)("checkout", [head_branch]);
+                await execute_git("checkout", [head_branch]);
                 // Resetting ensures it points exactly to the new commit, even if the branch existed.
                 core.info(`Resetting existing local branch ${head_branch} to sync commit ${sync_commit_hash}...`);
-                await (0, git_1.execute_git)("reset", ["--hard", sync_commit_hash]);
+                await execute_git("reset", ["--hard", sync_commit_hash]);
             }
             else if (remote_branch_exists) {
                 core.info(`Branch ${head_branch} exists remotely but not locally. Fetching and checking out...`);
                 try {
-                    await (0, git_1.execute_git)("fetch", ["origin", `${head_branch}:${head_branch}`]);
-                    await (0, git_1.execute_git)("checkout", [head_branch]);
+                    await execute_git("fetch", ["origin", `${head_branch}:${head_branch}`]);
+                    await execute_git("checkout", [head_branch]);
                     core.info(`Resetting fetched branch ${head_branch} to sync commit ${sync_commit_hash}...`);
-                    await (0, git_1.execute_git)("reset", ["--hard", sync_commit_hash]);
+                    await execute_git("reset", ["--hard", sync_commit_hash]);
                 }
                 catch (fetchCheckoutError) {
                     core.warning(`Failed to fetch/checkout/reset remote branch ${head_branch}. Creating new local branch from commit hash as fallback. Error: ${fetchCheckoutError.message}`);
-                    await (0, git_1.execute_git)("checkout", ["-b", head_branch, sync_commit_hash]); // Create new branch from hash
+                    await execute_git("checkout", ["-b", head_branch, sync_commit_hash]); // Create new branch from hash
                 }
             }
             else {
                 core.info(`Branch ${head_branch} does not exist locally or remotely. Creating it from commit hash...`);
-                await (0, git_1.execute_git)("checkout", ["-b", head_branch, sync_commit_hash]); // Create new branch from hash
+                await execute_git("checkout", ["-b", head_branch, sync_commit_hash]); // Create new branch from hash
             }
             // --- Push and PR ---
             core.info(`Pushing branch ${head_branch} to origin...`);
-            await (0, git_1.execute_git)("push", ["--force", "origin", head_branch]);
+            await execute_git("push", ["--force", "origin", head_branch]);
             const pr_title = `Sync changes from Google Drive (${folder_id})`;
             const pr_body_lines = [
                 `This PR syncs changes detected in Google Drive folder [${folder_id}](https://drive.google.com/drive/folders/${folder_id}):`,
@@ -456,7 +420,7 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
                 body: pr_body
             };
             core.info(`Attempting to create or update Pull Request: ${pr_title} (${head_branch} -> ${initial_branch})`);
-            const pr_result = await (0, pull_requests_1.create_pull_request_with_retry)(auth_1.octokit, pr_params);
+            const pr_result = await create_pull_request_with_retry(octokit, pr_params);
             if (pr_result) {
                 core.info(`Pull request operation successful: ${pr_result.url}`);
                 // Store the result for the visual diff step
@@ -484,23 +448,23 @@ async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_
         // initial_branch is guaranteed to be assigned because determineInitialBranch runs first and throws on failure.
         core.info(`Cleaning up temporary branch '${original_state_branch}' and returning to '${initial_branch}'`);
         try {
-            const current_cleanup_branch_result = await (0, git_1.execute_git)('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true, ignoreReturnCode: true });
+            const current_cleanup_branch_result = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true, ignoreReturnCode: true });
             const current_cleanup_branch = current_cleanup_branch_result.stdout.trim();
             // Only checkout if not already on the initial branch
             if (current_cleanup_branch !== initial_branch) {
                 core.info(`Currently on branch '${current_cleanup_branch || 'detached HEAD'}', checking out initial branch '${initial_branch}'...`);
                 // Use --force checkout to discard potential failed changes from try block
-                await (0, git_1.execute_git)("checkout", ["--force", initial_branch]);
+                await execute_git("checkout", ["--force", initial_branch]);
             }
             else {
                 core.info(`Already on initial branch '${initial_branch}'.`);
             }
             // Delete the temporary state branch if it exists
             if (original_state_branch) {
-                const branch_check = await (0, git_1.execute_git)('show-ref', ['--verify', `refs/heads/${original_state_branch}`], { ignoreReturnCode: true, silent: true });
+                const branch_check = await execute_git('show-ref', ['--verify', `refs/heads/${original_state_branch}`], { ignoreReturnCode: true, silent: true });
                 if (branch_check.exitCode === 0) {
                     core.info(`Deleting temporary state branch '${original_state_branch}'...`);
-                    await (0, git_1.execute_git)("branch", ["-D", original_state_branch]);
+                    await execute_git("branch", ["-D", original_state_branch]);
                 }
                 else {
                     core.debug(`Temporary state branch '${original_state_branch}' not found for deletion (already deleted or never created?).`);

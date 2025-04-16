@@ -1,7 +1,4 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.MIME_TYPE_TO_EXTENSION = exports.GOOGLE_DOC_MIME_TYPES = void 0;
-exports.GOOGLE_DOC_MIME_TYPES = [
+export const GOOGLE_DOC_MIME_TYPES = [
     "application/vnd.google-apps.document",
     "application/vnd.google-apps.spreadsheet",
     "application/vnd.google-apps.presentation",
@@ -12,7 +9,7 @@ exports.GOOGLE_DOC_MIME_TYPES = [
     "application/vnd.google-apps.site",
     "application/vnd.google-apps.map"
 ];
-exports.MIME_TYPE_TO_EXTENSION = {
+export const MIME_TYPE_TO_EXTENSION = {
     "application/vnd.google-apps.document": "document",
     "application/vnd.google-apps.spreadsheet": "sheet",
     "application/vnd.google-apps.presentation": "presentation",
