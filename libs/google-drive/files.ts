@@ -10,11 +10,11 @@ import { GOOGLE_DOC_MIME_TYPES } from "./file_types";
 
 // --- Consolidated Helper Function to Create Generic Link Files ---
 /**
- * Creates a .gdrive-link.json file containing essential Drive metadata.
+ * Creates a .gdrive.json file containing essential Drive metadata.
  * @param drive_item The Drive item metadata.
  * @param local_content_path The intended local path for the *content* file.
  *                           The link file will be placed alongside it using the Drive name.
- * @returns The full path to the created .gdrive-link.json file.
+ * @returns The full path to the created .gdrive.json file.
  * @throws If essential drive_item properties (id, mimeType, name) are missing.
  */
 async function create_gdrive_link_file(drive_item: DriveItem, local_content_path: string): Promise<string> {
@@ -36,7 +36,7 @@ async function create_gdrive_link_file(drive_item: DriveItem, local_content_path
   const content_dir = path.dirname(local_content_path);
   // Use the exact Drive name as the base for the link file to ensure uniqueness
   const base_name = drive_item.name;
-  const link_file_name = `${base_name}.gdrive-link.json`; // Standard suffix
+  const link_file_name = `${base_name}.gdrive.json`; // Standard suffix
   const link_file_path = path.join(content_dir, link_file_name);
 
   core.info(`Creating/Updating GDrive link file: ${link_file_path} for '${drive_item.name}' (ID: ${drive_item.id})`);
@@ -104,7 +104,7 @@ async function download_file_content(file_id: string, local_path: string): Promi
 // --- handle_download_item using the consolidated link function ---
 /**
  * Handles downloading/representing a Drive item locally.
- * Always creates a .gdrive-link.json file using create_gdrive_link_file.
+ * Always creates a .gdrive.json file using create_gdrive_link_file.
  * Downloads content *only* if it's not a Google Workspace type.
  * @param drive_item The Drive item metadata.
  * @param local_path_base The intended local path for the *content* file.
@@ -138,7 +138,7 @@ export async function handle_download_item(
 
 // --- upload_file (already correct from previous answer) ---
 /**
- * Uploads a local file to Google Drive, skipping .gdrive-link.json files.
+ * Uploads a local file to Google Drive, skipping .gdrive.json files.
  * Can create a new file or update an existing one.
  * @param local_file_path Absolute path to the local file.
  * @param target_folder_id Drive Folder ID where the file should be uploaded.
@@ -152,8 +152,8 @@ export async function upload_file(
 ): Promise<{ id: string; success: boolean }> {
   const local_file_name = path.basename(local_file_path);
 
-  // Skip uploading the .gdrive-link.json files themselves
-  if (local_file_name.endsWith('.gdrive-link.json')) {
+  // Skip uploading the .gdrive.json files themselves
+  if (local_file_name.endsWith('.gdrive.json')) {
     core.info(`Skipping upload of GDrive link file: ${local_file_name}`);
     return { id: existing_drive_file?.id || '', success: true };
   }

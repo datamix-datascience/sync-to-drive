@@ -11,6 +11,11 @@ import { DriveItem } from "../google-drive/types";
 import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "../google-drive/file_types";
 import { FileInfo } from "../local-files/types";
 
+// Define a return type for the function
+interface HandleDriveChangesResult {
+  pr_number?: number;
+  head_branch?: string;
+}
 
 // Helper to safely get repo owner and name
 function get_repo_info(): { owner: string; repo: string } {
@@ -71,12 +76,13 @@ export async function handle_drive_changes(
   folder_id: string,
   on_untrack_action: "ignore" | "remove" | "request",
   trigger_event_name: string
-): Promise<void> {
+): Promise<HandleDriveChangesResult> { // Updated return type
   core.info(`Handling potential incoming changes from Drive folder: ${folder_id} (Trigger: ${trigger_event_name}, Untrack action: ${on_untrack_action})`);
 
   let original_state_branch: string = ''; // Initialize for finally block safety
   const repo_info = get_repo_info(); // Get repo info early
   const run_id = process.env.GITHUB_RUN_ID || Date.now().toString();
+  let result: HandleDriveChangesResult = {}; // Initialize result
 
   // *** Determine Initial Branch Name FIRST ***
   // This is now outside the main try/finally for sync logic & cleanup.
@@ -121,81 +127,94 @@ export async function handle_drive_changes(
     } catch (error) {
       core.error(`Failed list Drive content for folder ${folder_id}: ${(error as Error).message}. Aborting incoming sync logic.`);
       // Jump to finally for cleanup, don't proceed with comparison/PR
-      return;
+      return result; // Return empty result
     }
 
     // *** 4. Compare Drive state to local state ***
     const new_files_to_process: { path: string; item: DriveItem }[] = [];
     const modified_files_to_process: { path: string; item: DriveItem }[] = [];
     const deleted_local_paths: string[] = [];
-    const found_local_keys = new Set<string>();
+    const found_local_keys = new Set<string>(); // Track original local paths found
 
     for (const [drive_path, drive_item] of drive_files) {
       core.debug(`Comparing Drive item: '${drive_path}' (ID: ${drive_item.id})`);
       const drive_path_lower = drive_path.toLowerCase();
       const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
 
-      let expected_local_shortcut_path = "";
-      if (is_google_doc && drive_item.name) {
-        const type_extension = MIME_TYPE_TO_EXTENSION[drive_item.mimeType!] || 'googledoc';
-        const drive_base_name = path.basename(drive_item.name);
-        const drive_dir_name = path.dirname(drive_path);
-        const shortcut_filename = `${drive_base_name}.${type_extension}.json.txt`;
-        expected_local_shortcut_path = drive_dir_name === '.' ? shortcut_filename : path.join(drive_dir_name, shortcut_filename).replace(/\\/g, '/');
-        core.debug(` -> Is Google Doc. Expected local shortcut path: '${expected_local_shortcut_path}'`);
-      } else if (is_google_doc && !drive_item.name) {
-        core.warning(`Google Doc item (ID: ${drive_item.id}) has no name. Cannot determine expected shortcut path accurately.`);
-      }
+      // Define expected local paths
+      const expected_content_path = drive_path; // Path for the actual file content (if not GDoc)
+      const expected_link_path = `${drive_path}.gdrive.json`; // Path for the link file
 
-      const direct_match_key = local_lower_to_original_key.get(drive_path_lower);
-      const shortcut_match_key = expected_local_shortcut_path ? local_lower_to_original_key.get(expected_local_shortcut_path.toLowerCase()) : undefined;
+      // Use lowercase map for finding potential matches
+      const match_content_key = local_lower_to_original_key.get(expected_content_path.toLowerCase());
+      const match_link_key = local_lower_to_original_key.get(expected_link_path.toLowerCase());
 
-      let found_local_info: FileInfo | undefined = undefined;
-      let actual_found_local_key: string | undefined = undefined;
+      const local_content_info = match_content_key ? local_map.get(match_content_key) : undefined;
+      const local_link_info = match_link_key ? local_map.get(match_link_key) : undefined;
 
-      if (direct_match_key) {
-        found_local_info = local_map.get(direct_match_key);
-        actual_found_local_key = direct_match_key;
-        core.debug(` -> Found direct match in local map: '${actual_found_local_key}'`);
-      } else if (shortcut_match_key) {
-        found_local_info = local_map.get(shortcut_match_key);
-        actual_found_local_key = shortcut_match_key;
-        core.debug(` -> Found shortcut match in local map: '${actual_found_local_key}'`);
-      }
+      let needs_processing = false; // Flag if Drive item needs download/link update
 
-      if (!found_local_info || !actual_found_local_key) {
-        core.debug(` -> Local file NOT FOUND for Drive item '${drive_path}'. Treating as NEW.`);
-        new_files_to_process.push({ path: drive_path, item: drive_item });
+      if (is_google_doc) {
+        // For Google Docs, we expect ONLY the link file locally. Content file is an error.
+        if (local_content_info) {
+          core.warning(`Found unexpected local content file '${match_content_key}' for Google Doc '${drive_path}'. It should only have a link file. Marking for processing to fix.`);
+          needs_processing = true; // Will overwrite/remove content file and ensure link file
+          if (match_content_key) found_local_keys.add(match_content_key); // Mark content as found (to be deleted)
+        }
+        if (!local_link_info) {
+          core.debug(` -> Google Doc '${drive_path}' is NEW or missing its link file locally.`);
+          needs_processing = true; // Create the link file
+        } else {
+          // Link file exists. Check if it needs update (e.g., Drive item name changed).
+          // We'll re-create the link file during processing anyway, so mark it.
+          core.debug(` -> Google Doc '${drive_path}' link file found locally ('${match_link_key}'). Marking for potential update.`);
+          needs_processing = true;
+          if (match_link_key) found_local_keys.add(match_link_key); // Mark link as found
+        }
+
       } else {
-        found_local_keys.add(actual_found_local_key);
-        let needs_modification = false;
-        if (is_google_doc && expected_local_shortcut_path) {
-          if (actual_found_local_key !== expected_local_shortcut_path) {
-            core.info(`Modification detected for GDoc '${drive_path}': Local file '${actual_found_local_key}' needs update to expected shortcut format '${expected_local_shortcut_path}'.`);
-            needs_modification = true;
-          } else {
-            core.debug(` -> Google Doc '${drive_path}' found locally as correct shortcut '${actual_found_local_key}'. No content change needed.`);
-          }
-        } else if (!is_google_doc) {
-          const is_local_file_shortcut_format = actual_found_local_key.endsWith('.json.txt') && GOOGLE_DOC_MIME_TYPES.some(mime => actual_found_local_key.includes(`.gdrive-link.json.txt`));
-          if (is_local_file_shortcut_format) {
-            core.info(`Modification detected for non-GDoc '${drive_path}': Local file '${actual_found_local_key}' is an unexpected shortcut format. Updating.`);
-            needs_modification = true;
-          } else if (drive_item.hash && found_local_info.hash !== drive_item.hash) {
-            core.info(`Modification detected for file '${drive_path}': Hash mismatch.`);
-            needs_modification = true;
-          } else if (!drive_item.hash && !is_google_doc) {
-            core.warning(`Drive file '${drive_path}' (non-GDoc) has no md5Checksum. Treating as modified to ensure latest version.`);
-            needs_modification = true;
-          } else if (drive_path !== actual_found_local_key) {
-            core.info(`Rename detected: Drive path '${drive_path}' differs from matched local path '${actual_found_local_key}'. Will be handled as delete+add.`);
-            needs_modification = true;
-          } else {
-            core.debug(` -> File '${drive_path}' found locally ('${actual_found_local_key}') and matches Drive state. No modification needed.`);
+        // For non-Google Docs (binary files), we expect the content file AND the link file.
+        let reason = "";
+        if (!local_content_info) {
+          reason = "missing local content file";
+          needs_processing = true;
+        } else if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
+          reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
+          needs_processing = true;
+        } else if (!drive_item.hash) {
+          reason = "Drive item missing hash"; // Treat as modified
+          needs_processing = true;
+        }
+
+        if (!local_link_info) {
+          reason += reason ? " and missing link file" : "missing link file";
+          needs_processing = true;
+        } else {
+          // Link file exists, content matches (or hash missing). Mark link file as found.
+          if (match_link_key) found_local_keys.add(match_link_key);
+          // Also mark for processing to ensure link file is up-to-date even if content matches
+          if (!needs_processing) {
+            core.debug(` -> Binary file '${drive_path}' content matches, link file found. Marking for potential link file update.`);
+            needs_processing = true; // Ensure link file consistency
           }
         }
-        if (needs_modification) {
+
+        if (needs_processing) {
+          core.info(`Modification detected for binary file '${drive_path}': ${reason}.`);
+        } else {
+          core.debug(` -> Binary file '${drive_path}' matches local state.`);
+        }
+        // Mark content as found if it existed
+        if (match_content_key) found_local_keys.add(match_content_key);
+      }
+
+      // Add to the correct processing list
+      if (needs_processing) {
+        // Check if either expected local file existed to determine if modified or new
+        if (local_content_info || local_link_info) {
           modified_files_to_process.push({ path: drive_path, item: drive_item });
+        } else {
+          new_files_to_process.push({ path: drive_path, item: drive_item });
         }
       }
     } // End of comparison loop
@@ -205,25 +224,50 @@ export async function handle_drive_changes(
     core.debug("Checking for items deleted in Drive...");
     for (const [local_key, _local_file_info] of local_map) {
       if (!found_local_keys.has(local_key)) {
+        // Check if it's a .gdrive.json file whose corresponding content file *was* found
+        // Example: local has `image.png` and `image.png.gdrive.json`. Drive has `image.png`.
+        // We should *not* delete `image.png.gdrive.json` in this case.
+        if (local_key.endsWith('.gdrive.json')) {
+          const base_content_path = local_key.substring(0, local_key.length - '.gdrive.json'.length);
+          if (found_local_keys.has(base_content_path)) {
+            core.debug(`Keeping link file '${local_key}' as its content file '${base_content_path}' was found.`);
+            continue; // Don't add this link file to deletions
+          }
+        }
         core.info(`Deletion detected: Local item '${local_key}' not found during Drive scan.`);
         deleted_local_paths.push(local_key);
       }
     }
+    // Folder deletion check (remains the same logic conceptually)
     const local_folders = new Set<string>();
     local_files_list.forEach(f => {
-      let dir = path.dirname(f.relative_path);
-      while (dir && dir !== '.') {
-        local_folders.add(dir.replace(/\\/g, '/'));
-        dir = path.dirname(dir);
+      // Derive folder paths from both content and link files
+      const paths_to_check = [f.relative_path];
+      if (f.relative_path.endsWith('.gdrive.json')) {
+        const base_path = f.relative_path.substring(0, f.relative_path.length - '.gdrive.json'.length);
+        paths_to_check.push(base_path);
       }
+      paths_to_check.forEach(p => {
+        let dir = path.dirname(p);
+        while (dir && dir !== '.') {
+          local_folders.add(dir.replace(/\\/g, '/'));
+          dir = path.dirname(dir);
+        }
+      });
     });
+
     core.debug(`Local folders derived from file paths: ${[...local_folders].join(', ')}`)
     for (const local_folder_path of local_folders) {
       if (!drive_folders.has(local_folder_path) && !deleted_local_paths.some(p => p === local_folder_path || p.startsWith(local_folder_path + '/'))) {
-        const files_under_folder_in_drive = [...drive_files.keys()].some(drive_path => drive_path.startsWith(local_folder_path + '/'));
-        if (!files_under_folder_in_drive) {
-          core.info(`Deletion detected: Local folder '${local_folder_path}' seems removed from Drive.`);
+        // Check if *any* file (content or link) *or* Drive folder still exists under this local path prefix in Drive
+        const folder_still_relevant_in_drive =
+          [...drive_files.keys()].some(drive_path => drive_path.startsWith(local_folder_path + '/')) ||
+          [...drive_folders.keys()].some(drive_folder => drive_folder.startsWith(local_folder_path + '/'));
+
+        if (!folder_still_relevant_in_drive) {
+          core.info(`Deletion detected: Local folder structure '${local_folder_path}' seems entirely removed from Drive.`);
           if (!deleted_local_paths.includes(local_folder_path)) {
+            // Add the folder itself for deletion if it's not already covered
             deleted_local_paths.push(local_folder_path);
           }
         }
@@ -242,15 +286,24 @@ export async function handle_drive_changes(
     if (deleted_local_paths.length > 0) {
       if (should_remove) {
         core.info(`Processing ${deleted_local_paths.length} local items to remove...`);
+        // Sort paths to remove directories after files
+        deleted_local_paths.sort((a, b) => b.length - a.length);
         for (const local_path_to_delete of deleted_local_paths) {
           try {
+            // Check existence relative to current working directory
             if (!fs.existsSync(local_path_to_delete)) {
-              core.debug(`Local item '${local_path_to_delete}' already removed. Skipping git rm.`);
+              core.debug(`Local item '${local_path_to_delete}' already removed or doesn't exist. Skipping git rm.`);
+              // Ensure it's not marked for addition if it was somehow added before deletion check
+              added_or_updated_paths_final.delete(local_path_to_delete);
               continue;
             }
             core.info(`Removing local item: ${local_path_to_delete}`);
-            await execute_git("rm", ["-r", "--ignore-unmatch", "--", local_path_to_delete]);
+            // Use git rm with recursive flag and force for directories/files
+            // --ignore-unmatch prevents errors if the file is already gone (e.g., deleted manually or by a previous step)
+            await execute_git("rm", ["-rf", "--ignore-unmatch", "--", local_path_to_delete]);
             removed_paths_final.add(local_path_to_delete);
+            // If we remove a file, ensure it's not also marked as added/updated
+            added_or_updated_paths_final.delete(local_path_to_delete);
             changes_made = true;
           } catch (error) {
             core.error(`Failed to stage deletion of ${local_path_to_delete}: ${(error as Error).message}`);
@@ -268,73 +321,77 @@ export async function handle_drive_changes(
     core.info(`Processing ${new_files_to_process.length} new and ${modified_files_to_process.length} modified items from Drive...`);
 
     for (const { path: original_drive_path, item: drive_item } of items_to_process) {
-      let target_local_path: string;
-      const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
+      // Determine the target local path for the *content*
+      // The link file path will be derived from this using the Drive item's name
+      const target_content_local_path = original_drive_path;
 
-      if (is_google_doc && drive_item.name) {
-        const type_extension = MIME_TYPE_TO_EXTENSION[drive_item.mimeType!] || 'googledoc';
-        const drive_base_name = path.basename(drive_item.name);
-        const drive_dir_name = path.dirname(original_drive_path);
-        const shortcut_filename = `${drive_base_name}.${type_extension}.json.txt`;
-        target_local_path = drive_dir_name === '.' ? shortcut_filename : path.join(drive_dir_name, shortcut_filename).replace(/\\/g, '/');
-      } else if (is_google_doc && !drive_item.name) {
-        core.warning(`Cannot determine target path for unnamed Google Doc ${drive_item.id}. Skipping processing.`);
-        continue;
-      }
-      else {
-        target_local_path = original_drive_path;
-      }
-
-      core.info(`Handling Drive item: ${drive_item.name || `(ID: ${drive_item.id})`} -> Target local path: ${target_local_path}`);
+      core.info(`Handling Drive item: ${drive_item.name || `(ID: ${drive_item.id})`} -> Target local content path: ${target_content_local_path}`);
 
       try {
-        const local_dir = path.dirname(target_local_path);
+        // Ensure parent directory for the *content* path exists
+        const local_dir = path.dirname(target_content_local_path);
         if (local_dir && local_dir !== '.') {
           await fs.promises.mkdir(local_dir, { recursive: true });
         }
-        const { linkFilePath, contentFilePath } = await handle_download_item(drive_item, target_local_path);
 
-        const add_or_updated = async (final_local_path?: string) => {
-          if (!final_local_path) return;
-          core.info(`Staging added/updated file: ${final_local_path}`);
-          await execute_git("add", ["--", final_local_path]);
-          added_or_updated_paths_final.add(final_local_path);
+        // Handle download/linking - creates link file and potentially content file
+        const { linkFilePath, contentFilePath } = await handle_download_item(drive_item, target_content_local_path);
+
+        // Helper to stage files and track changes
+        const stage_file = async (file_path_to_stage?: string) => {
+          if (!file_path_to_stage) return;
+          // Check if file actually exists before staging
+          if (!fs.existsSync(file_path_to_stage)) {
+            core.warning(`Attempted to stage file '${file_path_to_stage}' but it does not exist.`);
+            return;
+          }
+          core.info(`Staging added/updated file: ${file_path_to_stage}`);
+          await execute_git("add", ["--", file_path_to_stage]);
+          added_or_updated_paths_final.add(file_path_to_stage);
           changes_made = true;
 
-          if (removed_paths_final.has(final_local_path)) {
-            core.debug(`Path ${final_local_path} was added/updated, removing from final deletion list.`);
-            removed_paths_final.delete(final_local_path);
+          // If this file was previously marked for removal, unmark it
+          if (removed_paths_final.has(file_path_to_stage)) {
+            core.debug(`Path ${file_path_to_stage} was staged, removing from final deletion list.`);
+            removed_paths_final.delete(file_path_to_stage);
           }
-        }
+        };
 
-        await add_or_updated(linkFilePath);
-        await add_or_updated(contentFilePath);
+        // Stage the generated link file and content file (if created)
+        await stage_file(linkFilePath);
+        await stage_file(contentFilePath);
+
       } catch (error) {
-        core.error(`Failed to process/stage item from Drive ${drive_item.name || `(ID: ${drive_item.id})`} to ${target_local_path}: ${(error as Error).message}`);
+        core.error(`Failed to process/stage item from Drive ${drive_item.name || `(ID: ${drive_item.id})`} to ${target_content_local_path}: ${(error as Error).message}`);
       }
     } // End of processing loop
 
 
     // *** 7. Commit, Push, and Create PR if changes were made ***
-    if (!changes_made && removed_paths_final.size === 0 && added_or_updated_paths_final.size === 0) {
-      core.info("No effective local file changes detected (add/update/remove). Skipping commit and PR.");
-      return; // Jump to finally
-    }
-
+    // Re-check git status after all operations
     const status_result = await execute_git('status', ['--porcelain']);
     if (!status_result.stdout.trim()) {
       core.info("Git status clean after processing changes. No commit needed.");
-      if (changes_made) {
-        core.warning("Logic indicated changes were made, but git status is clean. Investigate if expected changes were skipped.");
-      }
-      return; // Jump to finally
+      return result; // Return empty result
     } else {
       core.info("Git status is not clean, proceeding with commit.");
       core.debug("Git status output:\n" + status_result.stdout);
+      // Update changes_made flag if status shows changes but the flag wasn't set
+      if (!changes_made) {
+        core.debug("Git status shows changes, ensuring changes_made flag is set.");
+        changes_made = true;
+      }
+    }
+
+    // Proceed only if changes_made is true (set during add/rm or by status check)
+    if (!changes_made) {
+      core.info("No effective file changes detected after final status check. Skipping commit and PR.");
+      return result; // Return empty result
     }
 
     core.info("Changes detected originating from Drive. Proceeding with commit and PR.");
     const commit_messages: string[] = [`Sync changes from Google Drive (${folder_id})`];
+    // Use the final sets for the commit message
     if (added_or_updated_paths_final.size > 0) commit_messages.push(`- Add/Update: ${[...added_or_updated_paths_final].map(p => `'${p}'`).join(", ")}`);
     if (removed_paths_final.size > 0) commit_messages.push(`- Remove: ${[...removed_paths_final].map(p => `'${p}'`).join(", ")}`);
     commit_messages.push(`\nSource Drive Folder ID: ${folder_id}`);
@@ -361,35 +418,30 @@ export async function handle_drive_changes(
       const local_branch_exists = local_branch_exists_check.exitCode === 0;
       const remote_branch_exists = remote_branch_exists_check.exitCode === 0;
 
+      // Create or checkout the head branch pointing to the temporary commit
       if (local_branch_exists) {
         core.info(`Branch ${head_branch} exists locally. Checking it out...`);
         await execute_git("checkout", [head_branch]);
+        // Resetting ensures it points exactly to the new commit, even if the branch existed.
+        core.info(`Resetting existing local branch ${head_branch} to sync commit ${sync_commit_hash}...`);
+        await execute_git("reset", ["--hard", sync_commit_hash]);
       } else if (remote_branch_exists) {
         core.info(`Branch ${head_branch} exists remotely but not locally. Fetching and checking out...`);
         try {
-          // Fetch the remote branch specifically into the local namespace with the same name
           await execute_git("fetch", ["origin", `${head_branch}:${head_branch}`]);
-          // Now checkout the local branch that was just created/updated by fetch
           await execute_git("checkout", [head_branch]);
+          core.info(`Resetting fetched branch ${head_branch} to sync commit ${sync_commit_hash}...`);
+          await execute_git("reset", ["--hard", sync_commit_hash]);
         } catch (fetchCheckoutError) {
-          core.warning(`Failed to fetch/checkout remote branch ${head_branch}. Creating new local branch from commit hash as fallback. Error: ${(fetchCheckoutError as Error).message}`);
-          // Fallback: Create the branch purely locally from the hash if fetch/checkout failed
-          await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
+          core.warning(`Failed to fetch/checkout/reset remote branch ${head_branch}. Creating new local branch from commit hash as fallback. Error: ${(fetchCheckoutError as Error).message}`);
+          await execute_git("checkout", ["-b", head_branch, sync_commit_hash]); // Create new branch from hash
         }
       } else {
         core.info(`Branch ${head_branch} does not exist locally or remotely. Creating it from commit hash...`);
-        await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
+        await execute_git("checkout", ["-b", head_branch, sync_commit_hash]); // Create new branch from hash
       }
 
-      // ** Critical Step: ** Ensure the checked-out branch points exactly to the new commit
-      core.info(`Resetting branch ${head_branch} to sync commit ${sync_commit_hash}...`);
-      await execute_git("reset", ["--hard", sync_commit_hash]); // DO NOT ignore return code here - reset must succeed
-
-
       // --- Push and PR ---
-      core.info(`Pushing branch ${head_branch} to origin...`);
-      await execute_git("push", ["--force", "origin", head_branch]);
-
       core.info(`Pushing branch ${head_branch} to origin...`);
       await execute_git("push", ["--force", "origin", head_branch]);
 
@@ -417,17 +469,23 @@ export async function handle_drive_changes(
 
       if (pr_result) {
         core.info(`Pull request operation successful: ${pr_result.url}`);
+        // Store the result for the visual diff step
+        result = { pr_number: pr_result.number, head_branch: head_branch };
       } else {
-        core.info("Pull request was not created or updated.");
+        core.info("Pull request was not created or updated (e.g., no diff).");
+        // Ensure result is empty if PR op wasn't successful
+        result = {};
       }
 
     } catch (error) {
       core.error(`Failed during commit, push, or PR creation: ${(error as Error).message}`);
+      result = {}; // Clear result on error
     }
 
   } catch (error) {
     // Catch errors from the main sync logic (state branching, listing, comparison, processing)
     core.error(`Error during Drive change handling for folder ${folder_id}: ${(error as Error).message}`);
+    result = {}; // Clear result on error
     // Allow finally block to run for cleanup
   } finally {
     // *** 8. Cleanup ***
@@ -460,4 +518,6 @@ export async function handle_drive_changes(
       core.warning(`Failed to fully clean up Git state (checkout initial branch or delete temp branch). Manual cleanup may be needed. Error: ${(checkoutError as Error).message}`);
     }
   }
+  // Return the result (contains PR info if successful)
+  return result;
 }

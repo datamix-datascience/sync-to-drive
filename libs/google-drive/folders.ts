@@ -1,7 +1,7 @@
 import * as core from "@actions/core";
 import { drive } from "./auth";
 import { DriveItem, DriveFilesListResponse } from "./types";
-import { FileInfo } from "../local-files/types"; 
+import { FileInfo } from "../local-files/types";
 import * as path from "path";
 
 // Ensure Folder
@@ -59,20 +59,16 @@ export async function build_folder_structure(
 
   const required_dir_paths = new Set<string>();
   for (const file of local_files) {
-    // Handle shortcut files correctly - base the structure on the non-shortcut path
-    let structure_relative_path = file.relative_path;
-    const shortcut_match = file.relative_path.match(/^(.*)\.[a-zA-Z]+\.json\.txt$/);
-    if (shortcut_match) {
-      // Assuming the second group is the type extension
-      structure_relative_path = shortcut_match[1];
-    }
+    // Just get the directory name from the relative path
+    const dir = path.dirname(file.relative_path);
 
-    const dir = path.dirname(structure_relative_path);
     if (dir && dir !== '.') {
+      // Add the directory and all its parents to the set
       const parts = dir.split(path.sep);
       let current_cumulative_path = "";
       for (const part of parts) {
         current_cumulative_path = current_cumulative_path ? path.join(current_cumulative_path, part) : part;
+        // Ensure consistent path separators (forward slashes)
         required_dir_paths.add(current_cumulative_path.replace(/\\/g, '/'));
       }
     }

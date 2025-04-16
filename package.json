@@ -1,20 +1,23 @@
 {
   "name": "sync-to-drive",
   "version": "1.0.0",
-  "main": "dist/sync_to_drive.js",
+  "main": "dist/index.js",
   "scripts": {
-    "build": "esbuild sync_to_drive.ts --bundle --platform=node --target=node20 --outfile=dist/sync_to_drive.js",
+    "build": "ncc build sync_to_drive.ts -o dist",
     "start": "ts-node sync_to_drive.ts"
   },
   "dependencies": {
     "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.0",
     "@octokit/rest": "^21.1.1",
     "glob": "^11.0.1",
     "googleapis": "^148.0.0",
+    "mupdf": "^1.3.6",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.2"
   },
   "devDependencies": {
+    "@vercel/ncc": "^0.38.3",
     "esbuild": "^0.25.2"
   }
 }

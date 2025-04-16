@@ -1,9 +1,11 @@
 import * as core from "@actions/core";
 import * as path from "path";
+import * as github from '@actions/github'; // Need this for context
 
 // Lib Imports
 import { config, SyncConfig, DriveTarget } from "./libs/config"; // Load config first
-import { credentials_json } from "./libs/google-drive/auth"; // Needed for ownership check
+import { credentials_json, drive } from "./libs/google-drive/auth"; // Needed for ownership check + drive client
+import { octokit } from "./libs/github/auth"; // Get initialized octokit
 import { list_local_files } from "./libs/local-files/list";
 import { list_drive_files_recursively } from "./libs/google-drive/list";
 import { build_folder_structure } from "./libs/google-drive/folders";
@@ -13,11 +15,19 @@ import { request_ownership_transfer, accept_ownership_transfers } from "./libs/g
 import { handle_drive_changes } from "./libs/sync-logic/handle-drive-changes";
 import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "./libs/google-drive/file_types";
 import { DriveItem } from "./libs/google-drive/types";
-import { drive } from "./libs/google-drive/auth"; // Needed for direct Drive calls (rename)
+// Import the new visual diff generator
+import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visual_diffs';
 
-// --- Get Trigger Event Name ---
-// Read this early, needed by handle_drive_changes
+// --- Get Inputs ---
 const trigger_event_name = core.getInput('trigger_event_name', { required: true });
+// Inputs for visual diff generation
+const enable_visual_diffs = core.getBooleanInput('enable_visual_diffs', { required: false });
+const visual_diff_output_dir = core.getInput('visual_diff_output_dir', { required: false }) || 'visual-diff-output'; // Default directory
+const visual_diff_link_suffix = core.getInput('visual_diff_link_suffix', { required: false }) || '.gdrive.json'; // Default suffix matching our creation logic
+const visual_diff_dpi = parseInt(core.getInput('visual_diff_dpi', { required: false }) || '150', 10); // Default DPI
+const git_user_name = core.getInput('git_user_name', { required: false }) || 'github-actions[bot]';
+const git_user_email = core.getInput('git_user_email', { required: false }) || 'github-actions[bot]@users.noreply.github.com';
+
 
 // *** Main sync function ***
 async function sync_main() {
@@ -29,11 +39,20 @@ async function sync_main() {
   const [owner, repo] = repo_full_name.split("/");
   core.info(`Syncing repository: ${owner}/${repo}`);
   core.info(`Triggered by event: ${trigger_event_name}`);
+  core.info(`Visual Diff Generation Enabled: ${enable_visual_diffs}`);
 
-  // We might list local files again inside the loop for outgoing sync,
-  // but an initial list can be useful for early checks if needed.
-  // const initial_local_files = await list_local_files(".");
-  // core.info(`Found ${initial_local_files.length} initial local files potentially relevant.`);
+  // Validate visual diff inputs if enabled
+  if (enable_visual_diffs) {
+    if (isNaN(visual_diff_dpi) || visual_diff_dpi <= 0) {
+      core.setFailed(`Invalid visual_diff_dpi: ${core.getInput('visual_diff_dpi')}. Must be a positive number.`);
+      return;
+    }
+    if (!visual_diff_link_suffix.startsWith('.')) {
+      core.setFailed(`Invalid visual_diff_link_suffix: "${visual_diff_link_suffix}". Should start with a dot.`);
+      return;
+    }
+    core.info(`Visual Diff Settings: Output Dir='${visual_diff_output_dir}', Link Suffix='${visual_diff_link_suffix}', DPI=${visual_diff_dpi}`);
+  }
 
   for (const target of config.targets.forks) {
     const folder_id = target.drive_folder_id;
@@ -42,6 +61,7 @@ async function sync_main() {
     core.info(`Drive URL: ${target.drive_url || `https://drive.google.com/drive/folders/${folder_id}`}`);
 
     let operation_failed = false; // Track if any critical part fails for this target
+    let pr_details: { pr_number?: number; head_branch?: string } = {}; // Store PR info for visual diff
 
     try {
       // *** STEP 1: Sync Outgoing Changes (Local -> Drive) ***
@@ -66,6 +86,7 @@ async function sync_main() {
         } catch (listError) {
           core.error(`Failed list Drive content before outgoing sync: ${(listError as Error).message}. Skipping outgoing sync steps.`);
           operation_failed = true;
+          core.endGroup(); // Close group before continuing
           continue; // Skip to next target if listing fails critically
         }
 
@@ -87,23 +108,24 @@ async function sync_main() {
 
         for (const [local_relative_path, local_file] of current_local_map) {
           core.debug(`Processing local file for outgoing sync: ${local_relative_path}`);
-          let is_local_shortcut = false;
-          let drive_comparison_path = local_relative_path; // Path to compare/find in Drive
 
-          // Check if the *local* file is a shortcut placeholder
-          const shortcut_match = local_relative_path.match(/^(.*)\.([a-zA-Z]+)\.json\.txt$/);
-          if (shortcut_match && GOOGLE_DOC_MIME_TYPES.some(mime => MIME_TYPE_TO_EXTENSION[mime] === shortcut_match[2])) {
-            is_local_shortcut = true;
-            drive_comparison_path = shortcut_match[1]; // Use the base path for Drive lookup/comparison
-            core.debug(` -> Local file identified as shortcut placeholder. Drive comparison path: ${drive_comparison_path}`);
+          // Skip link files during outgoing sync - they are generated from Drive, not pushed to it
+          if (local_relative_path.endsWith(visual_diff_link_suffix)) {
+            core.debug(` -> Skipping GDrive link file: ${local_relative_path}`);
+            // We still need to track the *intended* Drive path based on this link file
+            // for the untracked check later. Assume link file name structure is <drive_base_name><link_suffix>
+            const drive_comparison_path = local_relative_path.substring(0, local_relative_path.length - visual_diff_link_suffix.length);
+            files_processed_for_outgoing.add(drive_comparison_path);
+            continue;
           }
 
-          files_processed_for_outgoing.add(drive_comparison_path); // Track the path expected in Drive
+          // Regular content file
+          const drive_comparison_path = local_relative_path;
+          files_processed_for_outgoing.add(drive_comparison_path);
 
           const existing_drive_file = drive_files_map_outgoing.get(drive_comparison_path);
-          const drive_target_name = path.basename(drive_comparison_path); // The name this file *should* have in Drive
+          const drive_target_name = path.basename(drive_comparison_path);
 
-          // Find the parent Drive folder ID using the *local* directory structure
           const local_dir_path = path.dirname(local_relative_path);
           const parent_dir_lookup = (local_dir_path === '.') ? "" : local_dir_path.replace(/\\/g, '/');
           const target_folder_id = folder_path_to_id_map.get(parent_dir_lookup);
@@ -113,48 +135,44 @@ async function sync_main() {
             continue;
           }
 
-          // --- Sync Logic ---
-          if (is_local_shortcut) {
-            // Local file is a shortcut. We DON'T upload its content.
-            // We only check if the corresponding Drive file exists and if its name needs updating.
-            core.debug(` -> Skipping content upload for local shortcut: ${local_relative_path}`);
-            if (existing_drive_file && existing_drive_file.name !== drive_target_name) {
-              core.info(`Local shortcut implies Drive file name should be '${drive_target_name}', but it is '${existing_drive_file.name}'. Updating Drive file name (ID: ${existing_drive_file.id}).`);
-              try {
-                await drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
-              } catch (renameError) {
-                core.warning(`Failed to rename Drive file ${existing_drive_file.id} based on local shortcut ${local_relative_path}: ${(renameError as Error).message}`);
-              }
-            } else if (!existing_drive_file) {
-              core.warning(`Local shortcut file '${local_relative_path}' exists, but no corresponding file found in Drive at path '${drive_comparison_path}'. Cannot enforce state.`);
-            }
-            continue; // Move to the next local file
-          }
-
-          // --- Regular local file (not a shortcut) ---
+          // --- Upload/Update Logic ---
           if (!existing_drive_file) {
-            // File exists locally, not in Drive -> Upload
             core.info(`New file detected locally: '${local_relative_path}'. Uploading to Drive folder ${target_folder_id}.`);
             await upload_file(local_file.path, target_folder_id);
           } else {
-            // File exists in both places. Compare hash and name.
-            const drive_file_needs_update = (!existing_drive_file.hash || existing_drive_file.hash !== local_file.hash);
-            const drive_file_needs_rename = (existing_drive_file.name !== drive_target_name);
-
-            if (drive_file_needs_update) {
-              core.info(`Local file '${local_relative_path}' is newer (hash mismatch or Drive hash missing). Updating Drive file (ID: ${existing_drive_file.id}).`);
-              // Pass existing file info for update operation. upload_file handles rename internally if needed.
-              await upload_file(local_file.path, target_folder_id, { id: existing_drive_file.id, name: existing_drive_file.name });
-            } else if (drive_file_needs_rename) {
-              // Hashes match, but name differs. Only rename the Drive file.
-              core.info(`File content matches, but name differs for '${local_relative_path}'. Renaming Drive file '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}).`);
-              try {
-                await drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
-              } catch (renameError) {
-                core.warning(`Failed to rename Drive file ${existing_drive_file.id}: ${(renameError as Error).message}`);
+            // Compare hash and name for regular files
+            if (GOOGLE_DOC_MIME_TYPES.includes(existing_drive_file.mimeType || '')) {
+              // If the Drive file is a Google Doc, we don't compare hashes.
+              // Check only if the name needs updating based on the local path.
+              core.debug(` -> Drive file ${existing_drive_file.id} is a Google Doc type.`);
+              if (existing_drive_file.name !== drive_target_name) {
+                core.info(`Local path implies Drive file name should be '${drive_target_name}', but it is '${existing_drive_file.name}'. Renaming Drive file (ID: ${existing_drive_file.id}).`);
+                try {
+                  await drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
+                } catch (renameError) {
+                  core.warning(`Failed to rename Drive Google Doc ${existing_drive_file.id}: ${(renameError as Error).message}`);
+                }
+              } else {
+                core.debug(` -> Google Doc name matches local path basename. No outgoing action needed.`);
               }
             } else {
-              core.debug(`Local file '${local_relative_path}' matches Drive file '${existing_drive_file.name}' (ID: ${existing_drive_file.id}). No outgoing sync needed.`);
+              // Regular binary file - compare hash and name
+              const drive_file_needs_update = (!existing_drive_file.hash || existing_drive_file.hash !== local_file.hash);
+              const drive_file_needs_rename = (existing_drive_file.name !== drive_target_name);
+
+              if (drive_file_needs_update) {
+                core.info(`Local file '${local_relative_path}' is newer (hash mismatch or Drive hash missing). Updating Drive file (ID: ${existing_drive_file.id}).`);
+                await upload_file(local_file.path, target_folder_id, { id: existing_drive_file.id, name: existing_drive_file.name });
+              } else if (drive_file_needs_rename) {
+                core.info(`File content matches, but name differs for '${local_relative_path}'. Renaming Drive file '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}).`);
+                try {
+                  await drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
+                } catch (renameError) {
+                  core.warning(`Failed to rename Drive file ${existing_drive_file.id}: ${(renameError as Error).message}`);
+                }
+              } else {
+                core.debug(`Local file '${local_relative_path}' matches Drive file '${existing_drive_file.name}' (ID: ${existing_drive_file.id}). No outgoing sync needed.`);
+              }
             }
           }
         } // End of local file loop
@@ -163,7 +181,7 @@ async function sync_main() {
         // *** STEP 2: Handle Untracked Files/Folders in Drive (after push sync) ***
         core.info("Step 2: Handling untracked items in Drive (after potential outgoing sync)...");
 
-        // Re-list Drive content *after* potential uploads/renames to get the latest state for untracked check
+        // Re-list Drive content *after* potential uploads/renames
         core.info("Re-listing Drive content after outgoing sync for untracked check...");
         try {
           const drive_data_after_sync = await list_drive_files_recursively(folder_id);
@@ -173,18 +191,18 @@ async function sync_main() {
         } catch (listError) {
           core.error(`Failed re-list Drive content after outgoing sync: ${(listError as Error).message}. Skipping untracked handling.`);
           operation_failed = true;
+          core.endGroup(); // Close group before continuing
           continue; // Skip to next target
         }
 
-
-        // Identify untracked items based on the paths processed from local files
+        // Identify untracked drive files
         const untracked_drive_files = Array.from(drive_files_map_outgoing.entries())
           .filter(([drive_path]) => !files_processed_for_outgoing.has(drive_path));
 
-        // Check untracked folders: A folder is untracked if its path wasn't required by any processed local file's path
+        // Identify untracked drive folders
         const required_folder_paths = new Set(folder_path_to_id_map.keys());
         const untracked_drive_folders = Array.from(drive_folders_map_outgoing.entries())
-          .filter(([folder_path]) => folder_path !== "" && !required_folder_paths.has(folder_path)); // Exclude root, check if path was needed
+          .filter(([folder_path]) => folder_path !== "" && !required_folder_paths.has(folder_path));
 
         core.info(`Found ${untracked_drive_files.length} potentially untracked files and ${untracked_drive_folders.length} potentially untracked folders in Drive.`);
 
@@ -193,16 +211,17 @@ async function sync_main() {
           ...untracked_drive_folders.map(([p, i]) => ({ path: p, item: i, isFolder: true }))
         ];
 
+        // (Untracked handling logic remains the same as before)
         if (all_untracked_items.length > 0) {
           if (on_untrack_action === "ignore") {
             core.info(`Ignoring ${all_untracked_items.length} untracked item(s) in Drive as per config.`);
+            all_untracked_items.forEach(u => core.debug(` - Ignored untracked: ${u.path} (ID: ${u.item.id})`));
           } else {
             core.info(`Processing ${all_untracked_items.length} untracked items based on on_untrack='${on_untrack_action}'...`);
             for (const { path: untracked_path, item: untracked_item, isFolder } of all_untracked_items) {
               core.info(`Processing untracked ${isFolder ? 'folder' : 'file'} in Drive: ${untracked_path} (ID: ${untracked_item.id}, Owned: ${untracked_item.owned})`);
 
               if (!untracked_item.owned) {
-                // --- Not owned by service account ---
                 const owner_info = untracked_item.permissions?.find(p => p.role === 'owner');
                 const current_owner_email = owner_info?.emailAddress;
                 core.warning(`Untracked item '${untracked_path}' (ID: ${untracked_item.id}) is not owned by the service account (Owner: ${current_owner_email || 'unknown'}).`);
@@ -214,21 +233,19 @@ async function sync_main() {
                   core.info(`Ignoring untracked, un-owned item '${untracked_path}' (action: ${on_untrack_action}).`);
                 }
               } else {
-                // --- Owned by service account ---
                 core.info(`Untracked item '${untracked_path}' is owned by the service account.`);
                 if (on_untrack_action === "remove") {
                   await delete_untracked(untracked_item.id, untracked_path, isFolder);
                 } else if (on_untrack_action === "request") {
-                  // Already owned, 'request' implies no action needed if owned
                   core.info(`Untracked item '${untracked_path}' is already owned. No action needed for 'request'.`);
                 }
-                // 'ignore' action is handled by the main 'if' block
               }
             }
           }
         } else {
           core.info("No untracked items found in Drive after outgoing sync.");
         }
+
       } else {
         core.info("Step 1 & 2: Skipping outgoing sync (local -> Drive) and untracked handling because trigger event was not 'push'.");
       } // End of 'if trigger_event_name === push'
@@ -250,9 +267,61 @@ async function sync_main() {
       if (!operation_failed) {
         core.info("Step 4: Handling potential incoming changes from Drive (Drive -> Local PR)...");
         // Pass the original trigger event name and the untrack action config
-        await handle_drive_changes(folder_id, on_untrack_action, trigger_event_name);
+        // Store the result which might contain PR details
+        pr_details = await handle_drive_changes(folder_id, on_untrack_action, trigger_event_name);
       } else {
         core.warning("Skipping Step 4 (Incoming Changes Check) due to failures in previous steps.");
+      }
+
+      // *** STEP 5: Generate Visual Diffs (if enabled and PR was created/updated) ***
+      if (enable_visual_diffs && pr_details.pr_number && pr_details.head_branch && !operation_failed) {
+        core.info("Step 5: Generating visual diffs for the created/updated PR...");
+        try {
+          // Get the SHA of the head branch from the PR context or fetch it
+          let head_sha = github.context.payload.pull_request?.head?.sha;
+          if (!head_sha && github.context.eventName === 'pull_request') {
+            core.warning("Could not get head SHA directly from PR payload context. Trying to fetch...");
+            // Attempt to fetch the head SHA if running in a different context or payload is minimal
+            const pr_data = await octokit.rest.pulls.get({ owner, repo, pull_number: pr_details.pr_number });
+            head_sha = pr_data.data.head.sha;
+          }
+          if (!head_sha) {
+            // Final attempt: get ref and then SHA
+            const ref_data = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${pr_details.head_branch}` });
+            head_sha = ref_data.data.object.sha;
+          }
+
+          if (!head_sha) {
+            throw new Error(`Could not determine head SHA for branch ${pr_details.head_branch}`);
+          }
+          core.info(`Using head SHA ${head_sha} for visual diff source.`);
+
+
+          await generate_visual_diffs_for_pr({
+            octokit,
+            drive,
+            pr_number: pr_details.pr_number,
+            head_branch: pr_details.head_branch,
+            head_sha: head_sha,
+            owner,
+            repo,
+            output_base_dir: visual_diff_output_dir,
+            link_file_suffix: visual_diff_link_suffix,
+            resolution_dpi: visual_diff_dpi,
+            git_user_name: git_user_name,
+            git_user_email: git_user_email,
+          });
+        } catch (diffError) {
+          core.error(`Visual diff generation failed: ${(diffError as Error).message}`);
+          // Decide if this should fail the whole target processing
+          // operation_failed = true; // Optional: Mark target as failed if diffs fail
+        }
+      } else if (enable_visual_diffs) {
+        if (operation_failed) {
+          core.info("Skipping Step 5 (Visual Diffs) because previous steps failed.");
+        } else {
+          core.info("Skipping Step 5 (Visual Diffs) because no PR was created/updated in Step 4.");
+        }
       }
 
     } catch (error) {

@@ -1,17 +1,42 @@
-name: "Sync to Google Drive"
-description: "Syncs repo files to Google Drive folders"
+name: "Sync To Google Drive and Generate Visual Diffs"
+description: "Syncs files between a GitHub repo and Google Drive folders, optionally generating visual diffs for PRs."
+
 inputs:
-  credentials:
-    description: "Base64-encoded Google Service Account JSON"
-    required: true
   github_token:
-    description: "GitHub token for API calls (e.g., creating PRs)"
+    description: "GitHub Token for API requests (e.g., creating PRs, listing files)"
     required: true
-    default: ${{ github.token }}
+  credentials:
+    description: "Base64 encoded Google Service Account JSON credentials"
+    required: true
   trigger_event_name:
-    description: "The event name that triggered the workflow (e.g., push, schedule)"
+    description: "Name of the event that triggered the workflow (e.g., push, schedule, workflow_dispatch)"
     required: true
+  # Visual Diff Inputs (Optional)
+  enable_visual_diffs:
+    description: 'Set to "true" to enable visual diff PNG generation after PR creation/update.'
+    required: false
+    default: "false"
+  visual_diff_output_dir:
+    description: "Directory (relative to repo root) where generated PNGs will be stored."
+    required: false
+    default: "visual-diff-output"
+  visual_diff_link_suffix:
+    description: "The file extension suffix used for Google Drive link files (must match generation)."
+    required: false
+    default: ".gdrive.json"
+  visual_diff_dpi:
+    description: "Resolution (DPI) for the generated PNG images."
+    required: false
+    default: "150"
+  git_user_name:
+    description: "Git user name for commits made by the action (e.g., visual diff PNGs)."
+    required: false
+    default: "github-actions[bot]"
+  git_user_email:
+    description: "Git user email for commits made by the action."
+    required: false
+    default: "github-actions[bot]@users.noreply.github.com"
+
 runs:
-  using: "node20"
-  main: "dist/sync_to_drive.js"
-  pre: "setup.js"
+  using: "node16" # Or node20
+  main: "dist/index.js"
