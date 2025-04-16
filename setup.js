@@ -3,7 +3,11 @@ const path = require("path");
 
 try {
   console.log("Installing additional dependencies...");
-  execSync("npm install mupdf", {
+  execSync("cat package.json", {
+    stdio: "inherit",
+    cwd: path.resolve(__dirname),
+  });
+  execSync("npm install", {
     stdio: "inherit",
     cwd: path.resolve(__dirname),
   });

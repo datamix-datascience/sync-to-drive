@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "scripts": {
-    "build": "ncc build index.ts -o dist -e mupdf",
+    "build": "tsc -p tsconfig.json",
     "start": "ts-node index.ts"
   },
   "dependencies": {
@@ -17,7 +17,6 @@
   "devDependencies": {
     "ts-node": "^10.9.2",
     "typescript": "^5.8.2",
-    "@tsconfig/node20": "^20.1.5",
-    "@vercel/ncc": "^0.38.3"
+    "@tsconfig/node20": "^20.1.5"
   }
 }
