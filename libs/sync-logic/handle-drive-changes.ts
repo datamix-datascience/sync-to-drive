@@ -274,13 +274,16 @@ export async function handle_drive_changes(
       // --- END: Logic to determine needs_processing ---
 
       if (needs_processing) {
-        core.info(`Change detected for ${is_google_doc ? "Google Doc" : needs_link_file ? "PDF/Shortcut" : "binary file"} '${drive_path}': ${reason}. Marking for processing.`);
+        // Log the final decision and reason *before* adding to the list
+        core.info(`--> Change detected for ${is_google_doc ? "Google Doc" : needs_link_file ? "PDF/Shortcut" : "binary file"} '${drive_path}': ${reason}. Adding to processing list.`);
         const item_to_add = { path: drive_path, item: drive_item };
         if (local_content_info || local_link_info) {
           modified_files_to_process.push(item_to_add);
         } else {
           new_files_to_process.push(item_to_add);
         }
+      } else {
+        core.debug(` -> No processing needed for '${drive_path}'.`);
       }
     } // End comparison loop
 
