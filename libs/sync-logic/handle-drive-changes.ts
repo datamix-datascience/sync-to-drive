@@ -9,6 +9,8 @@ import { create_pull_request_with_retry } from "../github/pull-requests.js";
 import { octokit } from "../github/auth.js";
 import { DriveItem } from "../google-drive/types.js";
 import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES } from "../google-drive/file_types.js";
+import { format_pr_body } from "./pretty.js";
+import { SuccessfullyProcessedItem } from "./types.js";
 
 // Define a return type for the function
 interface HandleDriveChangesResult {
@@ -84,8 +86,6 @@ export async function handle_drive_changes(
   let result: HandleDriveChangesResult = {}; // Initialize result
 
   // *** Determine Initial Branch Name FIRST ***
-  // This is now outside the main try/finally for sync logic & cleanup.
-  // If this fails, the function will exit early.
   const initial_branch = await determineInitialBranch(repo_info);
 
   try {
@@ -93,7 +93,6 @@ export async function handle_drive_changes(
     original_state_branch = `original-state-${folder_id}-${run_id}`;
     core.info(`Initial branch is '${initial_branch}'. Creating temporary state branch '${original_state_branch}'`);
     const initial_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
-    // Ensure the commit hash exists before trying to branch from it
     if (!initial_commit_hash) {
       throw new Error("Could not get initial commit hash.");
     }
@@ -101,15 +100,11 @@ export async function handle_drive_changes(
 
     // Step 2: List local files
     core.info("Listing local files from original state branch...");
-    const local_files_list = await list_local_files("."); // List files in the checked-out original state
+    const local_files_list = await list_local_files(".");
     const local_map = new Map(local_files_list.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
     core.info(`Found ${local_map.size} relevant local files in original state.`);
-
-    // Case-insensitive lookup map
     const local_lower_to_original_key = new Map<string, string>();
-    local_map.forEach((_, key) => {
-      local_lower_to_original_key.set(key.toLowerCase(), key);
-    });
+    local_map.forEach((_, key) => local_lower_to_original_key.set(key.toLowerCase(), key));
     core.debug(`Created lowercase lookup map with ${local_lower_to_original_key.size} entries.`);
 
     // Step 3: List Drive content
@@ -123,16 +118,16 @@ export async function handle_drive_changes(
       core.info(`Found ${drive_files.size} files and ${drive_folders.size} folders in Drive.`);
     } catch (error) {
       core.error(`Failed list Drive content for folder ${folder_id}: ${(error as Error).message}. Aborting incoming sync logic.`);
-      // Jump to finally for cleanup, don't proceed with comparison/PR
-      return result; // Return empty result
+      return result;
     }
 
     // Step 4: Compare Drive state to local state
-    const new_files_to_process: { path: string; item: DriveItem }[] = [];
-    const modified_files_to_process: { path: string; item: DriveItem }[] = [];
+    const new_files_to_process: SuccessfullyProcessedItem[] = []; // Use the new type
+    const modified_files_to_process: SuccessfullyProcessedItem[] = []; // Use the new type
     const deleted_local_paths: string[] = [];
     const found_local_keys = new Set<string>();
 
+    // --- Comparison Loop (largely unchanged, focuses on identifying needs_processing) ---
     for (const [drive_path, drive_item] of drive_files) {
       core.debug(`Comparing Drive item: '${drive_path}' (ID: ${drive_item.id}, MIME: ${drive_item.mimeType}, modifiedTime: ${drive_item.modifiedTime})`);
       const drive_path_lower = drive_path.toLowerCase();
@@ -151,6 +146,7 @@ export async function handle_drive_changes(
       let needs_processing = false;
       let reason = "";
 
+      // --- START: Logic to determine needs_processing and reason (same as before) ---
       if (is_google_doc) {
         // Google Docs: Expect only .gdrive.json, no content file
         if (local_content_info) {
@@ -169,197 +165,162 @@ export async function handle_drive_changes(
             found_local_keys.add(match_link_key);
             try {
               const link_content = await fs.promises.readFile(match_link_key, "utf-8");
-              core.debug(` -> Existing .gdrive.json content for '${match_link_key}': ${link_content}`);
               const link_data = JSON.parse(link_content);
               const stored_modified_time = link_data.modifiedTime;
               const drive_modified_time = drive_item.modifiedTime;
-
               core.debug(` -> Google Doc '${drive_path}' modifiedTime comparison: stored=${stored_modified_time}, drive=${drive_modified_time}`);
-
-              // Validate modifiedTime format
               if (drive_modified_time && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z$/.test(drive_modified_time)) {
                 core.warning(` -> Invalid modifiedTime format for '${drive_path}': ${drive_modified_time}`);
-                needs_processing = true;
-                reason = "invalid modifiedTime format";
+                needs_processing = true; reason = "invalid modifiedTime format";
               } else if (!stored_modified_time || !drive_modified_time) {
-                core.debug(` -> Google Doc '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
-                needs_processing = true;
-                reason = "missing modifiedTime data";
+                core.debug(` -> Google Doc '${drive_path}' missing modifiedTime data. Marking for update.`);
+                needs_processing = true; reason = "missing modifiedTime data";
               } else if (stored_modified_time !== drive_modified_time) {
-                core.debug(` -> Google Doc '${drive_path}' modified (Drive: ${drive_modified_time}, Local: ${stored_modified_time}). Marking for update.`);
-                needs_processing = true;
-                reason = `modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
+                core.debug(` -> Google Doc '${drive_path}' modified. Marking for update.`);
+                needs_processing = true; reason = `modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
               } else {
-                core.debug(` -> Google Doc '${drive_path}' link file found and modifiedTime matches. No update needed.`);
+                core.debug(` -> Google Doc '${drive_path}' link file up-to-date.`);
               }
             } catch (error) {
-              core.warning(`Failed to read or parse link file '${match_link_key}': ${(error as Error).message}. Marking for update.`);
-              needs_processing = true;
-              reason = "failed to parse link file";
+              core.warning(`Failed to read/parse link file '${match_link_key}': ${(error as Error).message}. Marking for update.`);
+              needs_processing = true; reason = "failed to parse link file";
             }
           }
         }
       } else if (needs_link_file) {
         // PDFs: Expect both content file and .gdrive.json
+        let content_mismatch = false;
         if (!local_content_info) {
-          core.debug(` -> PDF '${drive_path}' is NEW or missing its content file locally.`);
-          needs_processing = true;
-          reason = "missing content file";
+          core.debug(` -> PDF '${drive_path}' is NEW or missing content file.`);
+          needs_processing = true; reason = "missing content file";
+          content_mismatch = true; // Assume content needs update if missing
         } else {
           if (match_content_key) found_local_keys.add(match_content_key);
-          // Check hash for content
           if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
-            core.debug(` -> PDF '${drive_path}' has hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash}). Marking for update.`);
-            needs_processing = true;
-            reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
+            core.debug(` -> PDF '${drive_path}' hash mismatch. Marking for update.`);
+            needs_processing = true; reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
+            content_mismatch = true;
           } else if (!drive_item.hash) {
-            core.debug(` -> PDF '${drive_path}' in Drive is missing hash. Checking modifiedTime.`);
-            // Fallback to modifiedTime if hash is unavailable
-            if (local_link_info && match_link_key) {
-              found_local_keys.add(match_link_key);
-              try {
-                const link_content = await fs.promises.readFile(match_link_key, "utf-8");
-                core.debug(` -> Existing .gdrive.json content for '${match_link_key}': ${link_content}`);
-                const link_data = JSON.parse(link_content);
-                const stored_modified_time = link_data.modifiedTime;
-                const drive_modified_time = drive_item.modifiedTime;
-
-                core.debug(` -> PDF '${drive_path}' modifiedTime comparison: stored=${stored_modified_time}, drive=${drive_modified_time}`);
-
-                // Validate modifiedTime format
-                if (drive_modified_time && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z$/.test(drive_modified_time)) {
-                  core.warning(` -> Invalid modifiedTime format for '${drive_path}': ${drive_modified_time}`);
-                  needs_processing = true;
-                  reason = "invalid modifiedTime format";
-                } else if (!stored_modified_time || !drive_modified_time) {
-                  core.debug(` -> PDF '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
-                  needs_processing = true;
-                  reason = "missing modifiedTime data";
-                } else if (stored_modified_time !== drive_modified_time) {
-                  core.debug(` -> PDF '${drive_path}' modified (Drive: ${drive_modified_time}, Local: ${stored_modified_time}). Marking for update.`);
-                  needs_processing = true;
-                  reason = `modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
-                } else {
-                  core.debug(` -> PDF '${drive_path}' content and modifiedTime match. No update needed.`);
-                }
-              } catch (error) {
-                core.warning(`Failed to read or parse link file '${match_link_key}': ${(error as Error).message}. Marking for update.`);
-                needs_processing = true;
-                reason = "failed to parse link file";
-              }
-            } else {
-              core.debug(` -> PDF '${drive_path}' missing link file. Marking for update to create it.`);
-              needs_processing = true;
-              reason = "missing link file";
-            }
+            core.debug(` -> PDF '${drive_path}' Drive hash missing. Checking modifiedTime.`);
+            // Fallback to modifiedTime (will be checked below)
           } else {
-            core.debug(` -> PDF '${drive_path}' content matches based on hash. Checking link file.`);
-            // Check if link file needs update
-            if (!local_link_info) {
-              core.debug(` -> PDF '${drive_path}' missing link file. Marking for update.`);
-              needs_processing = true;
-              reason = "missing link file";
-            } else if (match_link_key) {
-              found_local_keys.add(match_link_key);
-              try {
-                const link_content = await fs.promises.readFile(match_link_key, "utf-8");
-                core.debug(` -> Existing .gdrive.json content for '${match_link_key}': ${link_content}`);
-                const link_data = JSON.parse(link_content);
-                const stored_modified_time = link_data.modifiedTime;
-                const drive_modified_time = drive_item.modifiedTime;
-
-                core.debug(` -> PDF '${drive_path}' modifiedTime comparison: stored=${stored_modified_time}, drive=${drive_modified_time}`);
-
-                // Validate modifiedTime format
-                if (drive_modified_time && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z$/.test(drive_modified_time)) {
-                  core.warning(` -> Invalid modifiedTime format for '${drive_path}': ${drive_modified_time}`);
-                  needs_processing = true;
-                  reason = "invalid modifiedTime format";
-                } else if (!stored_modified_time || !drive_modified_time) {
-                  core.debug(` -> PDF '${drive_path}' missing modifiedTime in link file or Drive data. Marking for update.`);
-                  needs_processing = true;
-                  reason = "missing modifiedTime data";
-                } else if (stored_modified_time !== drive_modified_time) {
-                  core.debug(` -> PDF '${drive_path}' link file modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time}). Marking for update.`);
-                  needs_processing = true;
-                  reason = `modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
-                } else {
-                  core.debug(` -> PDF '${drive_path}' link file modifiedTime matches. No update needed.`);
-                }
-              } catch (error) {
-                core.warning(`Failed to read or parse link file '${match_link_key}': ${(error as Error).message}. Marking for update.`);
-                needs_processing = true;
-                reason = "failed to parse link file";
-              }
-            }
+            core.debug(` -> PDF '${drive_path}' content matches hash.`);
           }
         }
+        // Check link file, regardless of content state (might need update even if content matches)
+        if (!local_link_info) {
+          core.debug(` -> PDF '${drive_path}' missing link file. Marking for update.`);
+          needs_processing = true; reason = reason ? `${reason}, missing link file` : "missing link file";
+        } else if (match_link_key) {
+          found_local_keys.add(match_link_key);
+          try {
+            const link_content = await fs.promises.readFile(match_link_key, "utf-8");
+            const link_data = JSON.parse(link_content);
+            const stored_modified_time = link_data.modifiedTime;
+            const drive_modified_time = drive_item.modifiedTime;
+            core.debug(` -> PDF '${drive_path}' link modifiedTime comparison: stored=${stored_modified_time}, drive=${drive_modified_time}`);
+            if (drive_modified_time && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z$/.test(drive_modified_time)) {
+              core.warning(` -> Invalid modifiedTime format for '${drive_path}': ${drive_modified_time}`);
+              needs_processing = true; reason = reason ? `${reason}, invalid modifiedTime format` : "invalid modifiedTime format";
+            } else if (!stored_modified_time || !drive_modified_time) {
+              core.debug(` -> PDF '${drive_path}' missing modifiedTime data. Marking for update.`);
+              needs_processing = true; reason = reason ? `${reason}, missing modifiedTime data` : "missing modifiedTime data";
+            } else if (stored_modified_time !== drive_modified_time) {
+              core.debug(` -> PDF '${drive_path}' link modifiedTime mismatch. Marking for update.`);
+              needs_processing = true; reason = reason ? `${reason}, link modifiedTime mismatch` : `link modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
+              // If hash was missing OR content matched hash, but modifiedTime differs, assume content change
+              if (!drive_item.hash || !content_mismatch) {
+                core.debug(` -> Marking content for update due to modifiedTime mismatch (hash was missing or matched).`);
+                content_mismatch = true; // Ensures content gets redownloaded
+              }
+            } else {
+              core.debug(` -> PDF '${drive_path}' link file up-to-date.`);
+            }
+          } catch (error) {
+            core.warning(`Failed to read/parse link file '${match_link_key}': ${(error as Error).message}. Marking for update.`);
+            needs_processing = true; reason = reason ? `${reason}, failed to parse link file` : "failed to parse link file";
+          }
+        }
+        // Final check: if drive hash was missing and modified time matched, AND content wasn't already marked as mismatch, then skip
+        if (!drive_item.hash && !content_mismatch && needs_processing && reason.includes("modifiedTime mismatch") === false && reason.includes("missing modifiedTime data") === false) {
+          // Example: hash missing, link parse fail, but modifiedTime matched?
+          // Or: hash missing, link file missing, but local content exists? This is ambiguous.
+          // Let's stick with the simpler logic: if modifiedTime check didn't flag it, and hash was missing, assume no change unless files are missing.
+          core.debug(` -> PDF '${drive_path}' with missing Drive hash and no definite mismatch detected. Reviewing reason: ${reason}`);
+          if (!reason.includes("missing content file") && !reason.includes("missing link file") && !reason.includes("parse link file") && !reason.includes("invalid modifiedTime")) {
+            // If the only reason was 'missing hash' but modifiedTime matched, unmark
+            // Let's refine: If needs_processing is true ONLY because drive hash is missing, AND modifiedTime comparison succeeded and matched, then unmark.
+            // This requires tracking the *source* of the needs_processing flag, which adds complexity.
+            // Simpler: Assume modified if hash is missing unless modifiedTime explicitly matches. The existing logic handles this.
+          }
+        } else if (content_mismatch && !reason.includes("content hash mismatch") && !reason.includes("missing content file")) {
+          // Ensure reason reflects content update if content_mismatch is true but wasn't the *initial* reason
+          reason = reason ? `${reason}, content update required` : "content update required";
+        }
+
+
       } else {
-        // Other binary files: Expect only content file, no .gdrive.json
+        // Other binary files: Expect only content file
         if (!local_content_info) {
           core.debug(` -> Binary file '${drive_path}' is NEW or missing locally.`);
-          needs_processing = true;
-          reason = "missing content file";
+          needs_processing = true; reason = "missing content file";
         } else {
           if (match_content_key) found_local_keys.add(match_content_key);
           if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
-            core.debug(` -> Binary file '${drive_path}' has hash mismatch.`);
-            needs_processing = true;
-            reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
+            core.debug(` -> Binary file '${drive_path}' hash mismatch.`);
+            needs_processing = true; reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
           } else if (!drive_item.hash) {
-            core.debug(` -> Binary file '${drive_path}' in Drive is missing hash. Treating as modified.`);
-            needs_processing = true;
-            reason = "Drive item missing hash";
+            core.debug(` -> Binary file '${drive_path}' Drive hash missing. Treating as modified.`);
+            needs_processing = true; reason = "Drive item missing hash";
           } else {
-            core.debug(` -> Binary file '${drive_path}' matches local state based on hash.`);
-            needs_processing = false;
+            core.debug(` -> Binary file '${drive_path}' matches local state hash.`);
           }
         }
         if (local_link_info) {
-          core.warning(`Found unexpected local link file '${match_link_key}' for non-PDF, non-Google Doc '${drive_path}'. Scheduling for deletion.`);
+          core.warning(`Found unexpected local link file '${match_link_key}' for non-PDF/GDoc '${drive_path}'. Scheduling for deletion.`);
           if (match_link_key) {
             found_local_keys.add(match_link_key);
-            deleted_local_paths.push(match_link_key);
+            deleted_local_paths.push(match_link_key); // Add to deletions immediately
           }
         }
       }
+      // --- END: Logic to determine needs_processing ---
 
       if (needs_processing) {
-        core.info(`Change detected for ${is_google_doc ? "Google Doc" : needs_link_file ? "PDF" : "binary file"} '${drive_path}': ${reason}. Marking for processing.`);
+        core.info(`Change detected for ${is_google_doc ? "Google Doc" : needs_link_file ? "PDF/Shortcut" : "binary file"} '${drive_path}': ${reason}. Marking for processing.`);
+        const item_to_add = { path: drive_path, item: drive_item };
         if (local_content_info || local_link_info) {
-          modified_files_to_process.push({ path: drive_path, item: drive_item });
+          modified_files_to_process.push(item_to_add);
         } else {
-          new_files_to_process.push({ path: drive_path, item: drive_item });
+          new_files_to_process.push(item_to_add);
         }
       }
-    }
+    } // End comparison loop
 
-    // Step 5: Identify deletions
+
+    // Step 5: Identify deletions (logic remains the same)
     core.debug("Checking for items deleted in Drive...");
     for (const [local_key, _local_file_info] of local_map) {
       if (!found_local_keys.has(local_key)) {
-        // Check if it's a .gdrive.json file whose corresponding content file *was* found
-        // Example: local has `image.png` and `image.png.gdrive.json`. Drive has `image.png`.
-        // We should *not* delete `image.png.gdrive.json` in this case.
         if (local_key.endsWith('.gdrive.json')) {
           const base_content_path = local_key.substring(0, local_key.length - '.gdrive.json'.length);
           if (found_local_keys.has(base_content_path)) {
             core.debug(`Keeping link file '${local_key}' as its content file '${base_content_path}' was found.`);
-            continue; // Don't add this link file to deletions
+            continue;
           }
         }
         core.info(`Deletion detected: Local item '${local_key}' not found during Drive scan.`);
-        deleted_local_paths.push(local_key);
+        if (!deleted_local_paths.includes(local_key)) { // Avoid duplicates if added above
+          deleted_local_paths.push(local_key);
+        }
       }
     }
-    // Folder deletion check (remains the same logic conceptually)
+    // Folder deletion check
     const local_folders = new Set<string>();
     local_files_list.forEach(f => {
-      // Derive folder paths from both content and link files
       const paths_to_check = [f.relative_path];
       if (f.relative_path.endsWith('.gdrive.json')) {
-        const base_path = f.relative_path.substring(0, f.relative_path.length - '.gdrive.json'.length);
-        paths_to_check.push(base_path);
+        paths_to_check.push(f.relative_path.substring(0, f.relative_path.length - '.gdrive.json'.length));
       }
       paths_to_check.forEach(p => {
         let dir = path.dirname(p);
@@ -369,18 +330,15 @@ export async function handle_drive_changes(
         }
       });
     });
-
     core.debug(`Local folders derived from file paths: ${[...local_folders].join(', ')}`);
     for (const local_folder_path of local_folders) {
       if (!drive_folders.has(local_folder_path) && !deleted_local_paths.some(p => p === local_folder_path || p.startsWith(local_folder_path + '/'))) {
-        // Check if *any* file (content or link) *or* Drive folder still exists under this local path prefix in Drive
         const folder_still_relevant_in_drive =
           [...drive_files.keys()].some(drive_path => drive_path.startsWith(local_folder_path + '/')) ||
           [...drive_folders.keys()].some(drive_folder => drive_folder.startsWith(local_folder_path + '/'));
         if (!folder_still_relevant_in_drive) {
           core.info(`Deletion detected: Local folder structure '${local_folder_path}' seems entirely removed from Drive.`);
           if (!deleted_local_paths.includes(local_folder_path)) {
-            // Add the folder itself for deletion if it's not already covered
             deleted_local_paths.push(local_folder_path);
           }
         }
@@ -388,34 +346,30 @@ export async function handle_drive_changes(
     }
     core.info(`Identified ${deleted_local_paths.length} local paths corresponding to items potentially deleted/renamed in Drive.`);
 
+
     // Step 6: Apply changes locally and stage them
     let changes_made = false;
-    const added_or_updated_paths_final = new Set<string>();
-    const removed_paths_final = new Set<string>();
+    const added_or_updated_paths_final = new Set<string>(); // Tracks actual staged files
+    const removed_paths_final = new Set<string>(); // Tracks actual removed files
+    const successfully_added_updated_items: SuccessfullyProcessedItem[] = []; // Tracks items for PR body
 
     // Handle Deletions
     const should_remove = trigger_event_name !== 'push' && on_untrack_action === 'remove';
     if (deleted_local_paths.length > 0) {
       if (should_remove) {
         core.info(`Processing ${deleted_local_paths.length} local items to remove...`);
-        // Sort paths to remove directories after files
-        deleted_local_paths.sort((a, b) => b.length - a.length);
+        deleted_local_paths.sort((a, b) => b.length - a.length); // Sort for directory removal
         for (const local_path_to_delete of deleted_local_paths) {
           try {
-            // Check existence relative to current working directory
             if (!fs.existsSync(local_path_to_delete)) {
-              core.debug(`Local item '${local_path_to_delete}' already removed or doesn't exist. Skipping git rm.`);
-              // Ensure it's not marked for addition if it was somehow added before deletion check
+              core.debug(`Local item '${local_path_to_delete}' already removed. Skipping git rm.`);
               added_or_updated_paths_final.delete(local_path_to_delete);
               continue;
             }
             core.info(`Removing local item: ${local_path_to_delete}`);
-            // Use git rm with recursive flag and force for directories/files
-            // --ignore-unmatch prevents errors if the file is already gone (e.g., deleted manually or by a previous step)
             await execute_git("rm", ["-rf", "--ignore-unmatch", "--", local_path_to_delete]);
-            removed_paths_final.add(local_path_to_delete);
-            // If we remove a file, ensure it's not also marked as added/updated
-            added_or_updated_paths_final.delete(local_path_to_delete);
+            removed_paths_final.add(local_path_to_delete); // Track successful removal
+            added_or_updated_paths_final.delete(local_path_to_delete); // Unmark if previously added
             changes_made = true;
           } catch (error) {
             core.error(`Failed to stage deletion of ${local_path_to_delete}: ${(error as Error).message}`);
@@ -433,62 +387,69 @@ export async function handle_drive_changes(
     core.info(`Processing ${new_files_to_process.length} new and ${modified_files_to_process.length} modified items from Drive...`);
 
     for (const { path: original_drive_path, item: drive_item } of items_to_process) {
-      // Determine the target local path for the *content*
-      // The link file path will be derived from this using the Drive item's name
       const target_content_local_path = original_drive_path;
-
       core.info(`Handling Drive item: ${drive_item.name || `(ID: ${drive_item.id})`} -> Target local content path: ${target_content_local_path}`);
+      let item_staging_succeeded = false; // Track success for *this specific item*
 
       try {
-        // Ensure parent directory for the *content* path exists
         const local_dir = path.dirname(target_content_local_path);
         if (local_dir && local_dir !== '.') {
           await fs.promises.mkdir(local_dir, { recursive: true });
         }
 
-        // Handle download/linking - creates link file and potentially content file
         const { linkFilePath, contentFilePath } = await handle_download_item(drive_item, target_content_local_path);
 
-        // Helper to stage files and track changes
-        const stage_file = async (file_path_to_stage?: string) => {
-          if (!file_path_to_stage) return;
-          // Check if file actually exists before staging
+        // Helper to stage files and track changes for *this item*
+        const stage_file = async (file_path_to_stage?: string): Promise<boolean> => {
+          if (!file_path_to_stage) return false;
           if (!fs.existsSync(file_path_to_stage)) {
             core.warning(`Attempted to stage file '${file_path_to_stage}' but it does not exist.`);
-            return;
+            return false;
           }
-          core.info(`Staging added/updated file: ${file_path_to_stage}`);
-          // Debug: Check Git ignore status
-          const ignore_check = await execute_git("check-ignore", [file_path_to_stage], { ignoreReturnCode: true });
-          core.debug(`Git check-ignore for '${file_path_to_stage}': ${ignore_check.stdout || "not ignored"}`);
-          await execute_git("add", ["--", file_path_to_stage]);
-          // Debug: Verify staging
-          const add_status = await execute_git("status", ["--porcelain", "--", file_path_to_stage], { ignoreReturnCode: true });
-          core.debug(`Git status after adding '${file_path_to_stage}':\n${add_status.stdout}`);
-          // Debug: Log file content
           try {
-            const content = await fs.promises.readFile(file_path_to_stage, "utf-8");
-            core.debug(`Staged file content for '${file_path_to_stage}': ${content}`);
-          } catch (error) {
-            core.debug(`Could not read staged file '${file_path_to_stage}' (binary or error): ${(error as Error).message}`);
-          }
-          added_or_updated_paths_final.add(file_path_to_stage);
-          changes_made = true;
+            core.info(`Staging added/updated file: ${file_path_to_stage}`);
+            const ignore_check = await execute_git("check-ignore", [file_path_to_stage], { ignoreReturnCode: true });
+            core.debug(`Git check-ignore for '${file_path_to_stage}': ${ignore_check.stdout || "not ignored"}`);
 
-          // If this file was previously marked for removal, unmark it
-          if (removed_paths_final.has(file_path_to_stage)) {
-            core.debug(`Path ${file_path_to_stage} was staged, removing from final deletion list.`);
-            removed_paths_final.delete(file_path_to_stage);
+            await execute_git("add", ["--", file_path_to_stage]);
+
+            const add_status = await execute_git("status", ["--porcelain", "--", file_path_to_stage], { ignoreReturnCode: true });
+            core.debug(`Git status after adding '${file_path_to_stage}':\n${add_status.stdout}`);
+
+            added_or_updated_paths_final.add(file_path_to_stage); // Track overall staged files
+            changes_made = true; // Set global flag
+
+            // If this file was previously marked for removal, unmark it
+            if (removed_paths_final.has(file_path_to_stage)) {
+              core.debug(`Path ${file_path_to_stage} was staged, removing from final deletion list.`);
+              removed_paths_final.delete(file_path_to_stage);
+            }
+            return true; // Indicate success for this file
+          } catch (stageError) {
+            core.warning(`Failed to stage ${file_path_to_stage}: ${(stageError as Error).message}`);
+            return false; // Indicate failure for this file
           }
         };
 
-        // Stage the generated link file and content file (if created)
-        await stage_file(linkFilePath);
-        await stage_file(contentFilePath);
+        // Stage the generated files and track if any succeeded
+        const staged_link = await stage_file(linkFilePath);
+        const staged_content = await stage_file(contentFilePath);
+
+        if (staged_link || staged_content) {
+          item_staging_succeeded = true; // Mark item success if link OR content was staged
+        }
+
       } catch (error) {
         core.error(`Failed to process/stage item from Drive ${drive_item.name || `(ID: ${drive_item.id})`} to ${target_content_local_path}: ${(error as Error).message}`);
+        // item_staging_succeeded remains false
       }
-    }
+
+      // If staging succeeded for this item, add it to the list for the PR body
+      if (item_staging_succeeded) {
+        successfully_added_updated_items.push({ path: original_drive_path, item: drive_item });
+      }
+    } // end of items_to_process loop
+
 
     // Step 7: Commit, Push, and Create PR
     const status_result = await execute_git('status', ['--porcelain']);
@@ -498,27 +459,36 @@ export async function handle_drive_changes(
     } else {
       core.info("Git status is not clean, proceeding with commit.");
       core.debug("Git status output:\n" + status_result.stdout);
-      // Update changes_made flag if status shows changes but the flag wasn't set
       if (!changes_made) {
         core.debug("Git status shows changes, ensuring changes_made flag is set.");
         changes_made = true;
       }
     }
 
-    // Proceed only if changes_made is true (set during add/rm or by status check)
     if (!changes_made) {
       core.info("No effective file changes detected after final status check. Skipping commit and PR.");
       return result;
     }
 
     core.info("Changes detected originating from Drive. Proceeding with commit and PR.");
-    const commit_messages: string[] = [`Sync changes from Google Drive (${folder_id})`];
-    // Use the final sets for the commit message
-    if (added_or_updated_paths_final.size > 0) commit_messages.push(`- Add/Update: ${[...added_or_updated_paths_final].map(p => `'${p}'`).join(", ")}`);
-    if (removed_paths_final.size > 0) commit_messages.push(`- Remove: ${[...removed_paths_final].map(p => `'${p}'`).join(", ")}`);
-    commit_messages.push(`\nSource Drive Folder ID: ${folder_id}`);
-    commit_messages.push(`Workflow Run ID: ${run_id}`);
-    const commit_message = commit_messages.join("\n");
+
+    // *** USE THE NEW HELPER FOR COMMIT MESSAGE DETAILS (optional but consistent) ***
+    const commit_detail_lines = [];
+    // Use successfully_added_updated_items which relates to Drive items, not just staged files
+    const added_updated_display_paths = successfully_added_updated_items
+      .map(item => item.path) // Get the conceptual Drive path
+      .sort((a, b) => a.localeCompare(b)); // Sort them
+    if (added_updated_display_paths.length > 0) commit_detail_lines.push(`- Add/Update: ${added_updated_display_paths.map(p => `'${p}'`).join(", ")}`);
+    const removed_display_paths = Array.from(removed_paths_final).sort((a, b) => a.localeCompare(b)); // Use final removed paths
+    if (removed_display_paths.length > 0) commit_detail_lines.push(`- Remove: ${removed_display_paths.map(p => `'${p}'`).join(", ")}`);
+
+    const commit_message = [
+      `Sync changes from Google Drive (${folder_id})`,
+      ...commit_detail_lines,
+      `\nSource Drive Folder ID: ${folder_id}`,
+      `Workflow Run ID: ${run_id}`
+    ].join("\n");
+
 
     try {
       await execute_git("config", ["--local", "user.email", "github-actions[bot]@users.noreply.github.com"]);
@@ -529,53 +499,49 @@ export async function handle_drive_changes(
       const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
       core.info(`Created sync commit ${sync_commit_hash} on temporary branch '${original_state_branch}'.`);
 
-      // --- Prepare PR Branch ---
       const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
       const head_branch = `sync-from-drive-${sanitized_folder_id}`;
+      result.head_branch = head_branch; // Store head branch early in case of PR failure
       core.info(`Preparing PR branch: ${head_branch}`);
 
-      // Check existence of local and remote branch
+      // Check existence and create/checkout/reset PR branch (logic remains the same)
       const local_branch_exists_check = await execute_git('show-ref', ['--verify', `refs/heads/${head_branch}`], { ignoreReturnCode: true, silent: true });
       const remote_branch_exists_check = await execute_git('ls-remote', ['--exit-code', '--heads', 'origin', head_branch], { ignoreReturnCode: true, silent: true });
       const local_branch_exists = local_branch_exists_check.exitCode === 0;
       const remote_branch_exists = remote_branch_exists_check.exitCode === 0;
 
-      // Create or checkout the head branch pointing to the temporary commit
       if (local_branch_exists) {
-        core.info(`Branch ${head_branch} exists locally. Checking it out...`);
+        core.info(`Branch ${head_branch} exists locally. Checking it out and resetting...`);
         await execute_git("checkout", [head_branch]);
-        // Resetting ensures it points exactly to the new commit, even if the branch existed.
-        core.info(`Resetting existing local branch ${head_branch} to sync commit ${sync_commit_hash}...`);
         await execute_git("reset", ["--hard", sync_commit_hash]);
       } else if (remote_branch_exists) {
-        core.info(`Branch ${head_branch} exists remotely but not locally. Fetching and checking out...`);
+        core.info(`Branch ${head_branch} exists remotely. Fetching, checking out, and resetting...`);
         try {
           await execute_git("fetch", ["origin", `${head_branch}:${head_branch}`]);
           await execute_git("checkout", [head_branch]);
-          core.info(`Resetting fetched branch ${head_branch} to sync commit ${sync_commit_hash}...`);
           await execute_git("reset", ["--hard", sync_commit_hash]);
         } catch (fetchCheckoutError) {
-          core.warning(`Failed to fetch/checkout/reset remote branch ${head_branch}. Creating new local branch from commit hash as fallback. Error: ${(fetchCheckoutError as Error).message}`);
+          core.warning(`Failed to fetch/checkout/reset remote branch ${head_branch}. Creating new local branch. Error: ${(fetchCheckoutError as Error).message}`);
           await execute_git("checkout", ["-b", head_branch, sync_commit_hash]); // Create new branch from hash
         }
       } else {
-        core.info(`Branch ${head_branch} does not exist locally or remotely. Creating it from commit hash...`);
+        core.info(`Branch ${head_branch} does not exist. Creating it...`);
         await execute_git("checkout", ["-b", head_branch, sync_commit_hash]); // Create new branch from hash
       }
 
-      // --- Push and PR ---
+
       core.info(`Pushing branch ${head_branch} to origin...`);
       await execute_git("push", ["--force", "origin", head_branch]);
 
       const pr_title = `Sync changes from Google Drive (${folder_id})`;
-      const pr_body_lines = [
-        `This PR syncs changes detected in Google Drive folder [${folder_id}](https://drive.google.com/drive/folders/${folder_id}):`,
-        ...(added_or_updated_paths_final.size > 0 ? [`*   **Added/Updated:** ${[...added_or_updated_paths_final].map(p => `\`${p}\``).join(", ")}`] : []),
-        ...(removed_paths_final.size > 0 ? [`*   **Removed:** ${[...removed_paths_final].map(p => `\`${p}\``).join(", ")}`] : []),
-        `\n*Source Drive Folder ID: ${folder_id}*`,
-        `*Workflow Run ID: ${run_id}*`
-      ];
-      const pr_body = pr_body_lines.filter(line => line && line.trim() !== '').join('\n');
+      // *** USE THE NEW HELPER FUNCTION TO FORMAT THE PR BODY ***
+      const pr_body = format_pr_body(
+        folder_id,
+        run_id,
+        successfully_added_updated_items, // Pass the list of items with Drive info
+        removed_paths_final // Pass the set of successfully removed paths
+      );
+      // *** END PR BODY FORMATTING ***
 
       const pr_params = {
         owner: repo_info.owner,
@@ -591,49 +557,46 @@ export async function handle_drive_changes(
 
       if (pr_result) {
         core.info(`Pull request operation successful: ${pr_result.url}`);
-        // Store the result for the visual diff step
-        result = { pr_number: pr_result.number, head_branch: head_branch };
+        result = { pr_number: pr_result.number, head_branch: head_branch }; // Update result fully
       } else {
-        core.info("Pull request was not created or updated (e.g., no diff).");
-        // Ensure result is empty if PR op wasn't successful
-        result = {};
+        core.info("Pull request was not created or updated (e.g., no diff or error).");
+        // Keep head_branch in result if push succeeded but PR failed/not needed
+        if (!result.head_branch) result = {}; // Clear result if push also failed implicitly
       }
     } catch (error) {
       core.error(`Failed during commit, push, or PR creation: ${(error as Error).message}`);
-      result = {};
+      // Keep head_branch in result if push succeeded but subsequent steps failed
+      if (!result.head_branch) result = {};
     }
   } catch (error) {
     core.error(`Error during Drive change handling for folder ${folder_id}: ${(error as Error).message}`);
-    result = {};
+    result = {}; // Clear result on major error
   } finally {
+    // --- Cleanup logic remains the same ---
     core.info(`Cleaning up temporary branch '${original_state_branch}' and returning to '${initial_branch}'`);
     try {
       const current_cleanup_branch_result = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true, ignoreReturnCode: true });
       const current_cleanup_branch = current_cleanup_branch_result.stdout.trim();
 
-      // Only checkout if not already on the initial branch
       if (current_cleanup_branch !== initial_branch) {
         core.info(`Currently on branch '${current_cleanup_branch || 'detached HEAD'}', checking out initial branch '${initial_branch}'...`);
-        // Use --force checkout to discard potential failed changes from try block
         await execute_git("checkout", ["--force", initial_branch]);
       } else {
         core.info(`Already on initial branch '${initial_branch}'.`);
       }
 
-      // Delete the temporary state branch if it exists
       if (original_state_branch) {
         const branch_check = await execute_git('show-ref', ['--verify', `refs/heads/${original_state_branch}`], { ignoreReturnCode: true, silent: true });
         if (branch_check.exitCode === 0) {
           core.info(`Deleting temporary state branch '${original_state_branch}'...`);
           await execute_git("branch", ["-D", original_state_branch]);
         } else {
-          core.debug(`Temporary state branch '${original_state_branch}' not found for deletion (already deleted or never created?).`);
+          core.debug(`Temporary state branch '${original_state_branch}' not found for deletion.`);
         }
       }
     } catch (checkoutError) {
-      core.warning(`Failed to fully clean up Git state (checkout initial branch or delete temp branch). Manual cleanup may be needed. Error: ${(checkoutError as Error).message}`);
+      core.warning(`Failed to fully clean up Git state. Manual cleanup may be needed. Error: ${(checkoutError as Error).message}`);
     }
   }
-  // Return the result (contains PR info if successful)
   return result;
 }

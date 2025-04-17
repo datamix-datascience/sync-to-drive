@@ -5,6 +5,7 @@ export interface DriveFile {
   md5Checksum?: string;
   owners?: { emailAddress: string }[];
   modifiedTime: string;
+  webViewLink?: string;
 }
 
 export interface DriveFilesListResponse {
@@ -32,4 +33,5 @@ export interface DriveItem {
   modifiedTime: string; // RFC 3339 timestamp (e.g., '2025-04-16T12:34:56.789Z')
   owned?: boolean; // Whether the file is owned by the authenticated user
   permissions?: DrivePermission[]; // Access control details
+  webViewLink?: string;
 }
