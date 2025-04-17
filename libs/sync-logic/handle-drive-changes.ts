@@ -188,28 +188,40 @@ export async function handle_drive_changes(
           }
         }
       } else if (needs_link_file) {
-        // PDFs: Expect both content file and .gdrive.json
+        core.debug(`--- Debugging PDF/Link File: ${drive_path} ---`);
+        core.debug(` -> Drive Item Info: ID=${drive_item.id}, Hash=${drive_item.hash || 'N/A'}, ModifiedTime=${drive_item.modifiedTime}`);
+        core.debug(` -> Expected Content Path (local): ${expected_content_path}`);
+        core.debug(` -> Expected Link Path (local): ${expected_link_path}`);
+        core.debug(` -> Matching Key - Content: ${match_content_key || 'None'}`);
+        core.debug(` -> Matching Key - Link: ${match_link_key || 'None'}`);
+        core.debug(` -> Found Local Content? ${local_content_info ? `Yes (Path: ${local_content_info.path}, Hash: ${local_content_info.hash})` : 'No'}`);
+        core.debug(` -> Found Local Link? ${local_link_info ? `Yes (Path: ${local_link_info.path})` : 'No'}`);
+
         let content_mismatch = false;
         if (!local_content_info) {
-          core.debug(` -> PDF '${drive_path}' is NEW or missing content file.`);
+          core.debug(` -> Reason Check 1: Missing local content file ('${expected_content_path}').`);
           needs_processing = true; reason = "missing content file";
           content_mismatch = true; // Assume content needs update if missing
         } else {
           if (match_content_key) found_local_keys.add(match_content_key);
-          if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
-            core.debug(` -> PDF '${drive_path}' hash mismatch. Marking for update.`);
-            needs_processing = true; reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
-            content_mismatch = true;
-          } else if (!drive_item.hash) {
-            core.debug(` -> PDF '${drive_path}' Drive hash missing. Checking modifiedTime.`);
-            // Fallback to modifiedTime (will be checked below)
+          // Compare hashes only if Drive provides one
+          if (drive_item.hash) {
+            if (local_content_info.hash !== drive_item.hash) {
+              core.debug(` -> Reason Check 2: Content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash}).`);
+              needs_processing = true; reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
+              content_mismatch = true;
+            } else {
+              core.debug(` -> Content hash matches Drive hash.`);
+            }
           } else {
-            core.debug(` -> PDF '${drive_path}' content matches hash.`);
+            core.debug(` -> Drive hash is missing. Will rely on modifiedTime check for content change decision.`);
+            // Don't set needs_processing here based *only* on missing hash. ModifiedTime check will handle it.
           }
         }
+
         // Check link file, regardless of content state (might need update even if content matches)
         if (!local_link_info) {
-          core.debug(` -> PDF '${drive_path}' missing link file. Marking for update.`);
+          core.debug(` -> Reason Check 3: Missing local link file ('${expected_link_path}').`);
           needs_processing = true; reason = reason ? `${reason}, missing link file` : "missing link file";
         } else if (match_link_key) {
           found_local_keys.add(match_link_key);
@@ -218,71 +230,46 @@ export async function handle_drive_changes(
             const link_data = JSON.parse(link_content);
             const stored_modified_time = link_data.modifiedTime;
             const drive_modified_time = drive_item.modifiedTime;
-            core.debug(` -> PDF '${drive_path}' link modifiedTime comparison: stored=${stored_modified_time}, drive=${drive_modified_time}`);
+            core.debug(` -> Parsed link file: Stored modifiedTime='${stored_modified_time}' vs Drive modifiedTime='${drive_modified_time}'`);
+
+            // Validate Drive modified time format (basic check)
             if (drive_modified_time && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*Z$/.test(drive_modified_time)) {
-              core.warning(` -> Invalid modifiedTime format for '${drive_path}': ${drive_modified_time}`);
+              core.debug(` -> Reason Check 4: Invalid Drive modifiedTime format.`);
               needs_processing = true; reason = reason ? `${reason}, invalid modifiedTime format` : "invalid modifiedTime format";
+              content_mismatch = true; // Treat invalid time as requiring update
+              // Check if either time is missing
             } else if (!stored_modified_time || !drive_modified_time) {
-              core.debug(` -> PDF '${drive_path}' missing modifiedTime data. Marking for update.`);
+              core.debug(` -> Reason Check 5: Missing modifiedTime in link ('${stored_modified_time || 'null'}') or drive item ('${drive_modified_time || 'null'}').`);
               needs_processing = true; reason = reason ? `${reason}, missing modifiedTime data` : "missing modifiedTime data";
+              content_mismatch = true; // If time is missing, assume update needed
+              // Compare times if both exist and Drive format seems valid
             } else if (stored_modified_time !== drive_modified_time) {
-              core.debug(` -> PDF '${drive_path}' link modifiedTime mismatch. Marking for update.`);
+              core.debug(` -> Reason Check 6: Link modifiedTime mismatch.`);
               needs_processing = true; reason = reason ? `${reason}, link modifiedTime mismatch` : `link modifiedTime mismatch (Drive: ${drive_modified_time}, Local: ${stored_modified_time})`;
-              // If hash was missing OR content matched hash, but modifiedTime differs, assume content change
-              if (!drive_item.hash || !content_mismatch) {
-                core.debug(` -> Marking content for update due to modifiedTime mismatch (hash was missing or matched).`);
-                content_mismatch = true; // Ensures content gets redownloaded
+              // If modifiedTime differs, assume content *might* have changed, especially if hash was missing or matched (!content_mismatch covers both)
+              if (!content_mismatch) {
+                core.debug(` -> Marking content_mismatch=true due to modifiedTime difference (hash was missing or matched).`);
+                content_mismatch = true;
               }
             } else {
-              core.debug(` -> PDF '${drive_path}' link file up-to-date.`);
+              core.debug(` -> Link file modifiedTime matches Drive modifiedTime.`);
+              // If times match *AND* hash matched or was missing, *AND* files existed, then no processing needed *unless* link parsing failed earlier.
+              // We don't unset needs_processing here, but rely on it not being set by mismatch checks.
             }
           } catch (error) {
+            core.debug(` -> Reason Check 7: Failed to read/parse link file '${match_link_key}'.`);
             core.warning(`Failed to read/parse link file '${match_link_key}': ${(error as Error).message}. Marking for update.`);
             needs_processing = true; reason = reason ? `${reason}, failed to parse link file` : "failed to parse link file";
+            content_mismatch = true; // Assume update needed if link file is broken
           }
-        }
-        // Final check: if drive hash was missing and modified time matched, AND content wasn't already marked as mismatch, then skip
-        if (!drive_item.hash && !content_mismatch && needs_processing && reason.includes("modifiedTime mismatch") === false && reason.includes("missing modifiedTime data") === false) {
-          // Example: hash missing, link parse fail, but modifiedTime matched?
-          // Or: hash missing, link file missing, but local content exists? This is ambiguous.
-          // Let's stick with the simpler logic: if modifiedTime check didn't flag it, and hash was missing, assume no change unless files are missing.
-          core.debug(` -> PDF '${drive_path}' with missing Drive hash and no definite mismatch detected. Reviewing reason: ${reason}`);
-          if (!reason.includes("missing content file") && !reason.includes("missing link file") && !reason.includes("parse link file") && !reason.includes("invalid modifiedTime")) {
-            // If the only reason was 'missing hash' but modifiedTime matched, unmark
-            // Let's refine: If needs_processing is true ONLY because drive hash is missing, AND modifiedTime comparison succeeded and matched, then unmark.
-            // This requires tracking the *source* of the needs_processing flag, which adds complexity.
-            // Simpler: Assume modified if hash is missing unless modifiedTime explicitly matches. The existing logic handles this.
-          }
-        } else if (content_mismatch && !reason.includes("content hash mismatch") && !reason.includes("missing content file")) {
-          // Ensure reason reflects content update if content_mismatch is true but wasn't the *initial* reason
-          reason = reason ? `${reason}, content update required` : "content update required";
         }
 
-
-      } else {
-        // Other binary files: Expect only content file
-        if (!local_content_info) {
-          core.debug(` -> Binary file '${drive_path}' is NEW or missing locally.`);
-          needs_processing = true; reason = "missing content file";
-        } else {
-          if (match_content_key) found_local_keys.add(match_content_key);
-          if (drive_item.hash && local_content_info.hash !== drive_item.hash) {
-            core.debug(` -> Binary file '${drive_path}' hash mismatch.`);
-            needs_processing = true; reason = `content hash mismatch (Local: ${local_content_info.hash}, Drive: ${drive_item.hash})`;
-          } else if (!drive_item.hash) {
-            core.debug(` -> Binary file '${drive_path}' Drive hash missing. Treating as modified.`);
-            needs_processing = true; reason = "Drive item missing hash";
-          } else {
-            core.debug(` -> Binary file '${drive_path}' matches local state hash.`);
-          }
+        // Final check: Update the 'reason' string if content_mismatch ended up true for reasons other than missing file or hash mismatch initially.
+        if (content_mismatch && !reason.includes("content hash mismatch") && !reason.includes("missing content file")) {
+          reason = reason ? `${reason}, content update required (inferred)` : "content update required (inferred)";
+          core.debug(` -> Final reason updated to include inferred content update: ${reason}`);
         }
-        if (local_link_info) {
-          core.warning(`Found unexpected local link file '${match_link_key}' for non-PDF/GDoc '${drive_path}'. Scheduling for deletion.`);
-          if (match_link_key) {
-            found_local_keys.add(match_link_key);
-            deleted_local_paths.push(match_link_key); // Add to deletions immediately
-          }
-        }
+        core.debug(`--- End Debug PDF/Link File: ${drive_path}. Needs Processing: ${needs_processing}, Final Reason: ${reason || 'None'} ---`);
       }
       // --- END: Logic to determine needs_processing ---
 
