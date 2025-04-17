@@ -4,57 +4,11 @@ import * as fs_promises from "fs/promises";
 import * as path from "path";
 import { drive } from "./auth.js";
 import { DriveItem } from "./types.js";
-// Keep GOOGLE_DOC_MIME_TYPES needed for handle_download_item logic
 // Note: We no longer need anything else from shortcuts.ts for link file creation
-import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES } from "./file_types.js";
-
-// --- Consolidated Helper Function to Create Generic Link Files ---
-/**
- * Creates a .gdrive.json file containing essential Drive metadata.
- * @param drive_item The Drive item metadata.
- * @param local_content_path The intended local path for the *content* file.
- *                           The link file will be placed alongside it using the Drive name.
- * @returns The full path to the created .gdrive.json file.
- * @throws If essential drive_item properties (id, mimeType, name) are missing.
- */
-async function create_gdrive_link_file(drive_item: DriveItem, local_content_path: string): Promise<string> {
-  // Input validation
-  if (!drive_item.id || !drive_item.mimeType || !drive_item.name) {
-    core.error(`Drive item is missing required fields (id, mimeType, name): ${JSON.stringify(drive_item)}`);
-    throw new Error(`Cannot create link file for Drive item with missing id, mimeType, or name.`);
-  }
-
-  // Minimal required data for the downstream visual diff action
-  const link_data = {
-    id: drive_item.id,
-    mimeType: drive_item.mimeType,
-    name: drive_item.name, // Include name for better context/debugging
-  };
-  const link_file_content = JSON.stringify(link_data, null, 2);
-
-  // Determine link file path based on the *content* path's directory and the *Drive* name
-  const content_dir = path.dirname(local_content_path);
-  // Use the exact Drive name as the base for the link file to ensure uniqueness
-  const base_name = drive_item.name;
-  const link_file_name = `${base_name}.gdrive.json`; // Standard suffix
-  const link_file_path = path.join(content_dir, link_file_name);
-
-  core.info(`Creating/Updating GDrive link file: ${link_file_path} for '${drive_item.name}' (ID: ${drive_item.id})`);
-  try {
-    // Ensure directory exists before writing
-    await fs_promises.mkdir(content_dir, { recursive: true });
-    await fs_promises.writeFile(link_file_path, link_file_content, { encoding: 'utf-8' });
-    core.debug(` -> Link file content: ${link_file_content}`);
-    return link_file_path;
-  } catch (error) {
-    core.error(`Failed to write link file ${link_file_path}: ${(error as Error).message}`);
-    throw error; // Re-throw to indicate failure
-  }
-}
-
+// Import the specific function and map we need
+import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES, MIME_TYPE_TO_EXTENSION, get_link_file_suffix } from "./file_types.js";
 
 // Download File Content (Only for non-Google Docs - binary files)
-// (No changes needed in this function itself)
 async function download_file_content(file_id: string, local_path: string): Promise<void> {
   core.info(`Downloading Drive file content ID ${file_id} to local path ${local_path}`);
   try {
@@ -100,7 +54,6 @@ async function download_file_content(file_id: string, local_path: string): Promi
   }
 }
 
-
 // --- handle_download_item using the consolidated link function ---
 /**
  * Handles downloading/representing a Drive item locally.
@@ -115,14 +68,26 @@ export async function handle_download_item(
   target_content_local_path: string
 ): Promise<{ linkFilePath?: string; contentFilePath?: string }> {
   core.debug(`Handling download for Drive item: ${drive_item.name} (ID: ${drive_item.id}, MIME: ${drive_item.mimeType})`);
-  const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType || "");
-  const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType || "");
+  if (!drive_item.id || !drive_item.name || !drive_item.mimeType) {
+    core.error(`Drive item ${drive_item.id || drive_item.name || '(unknown)'} is missing required fields (id, name, mimeType). Skipping.`);
+    return {}; // Return empty if essential info is missing
+  }
+
+  const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType);
+  const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType);
   let linkFilePath: string | undefined;
   let contentFilePath: string | undefined;
 
-  // Create a .gdrive.json link file for Google Docs and PDFs
+  // Create a link file (e.g., .doc.gdrive.json) for Google Docs and PDFs
   if (needs_link_file) {
-    const link_file_path = `${target_content_local_path}.gdrive.json`;
+    const link_suffix = get_link_file_suffix(drive_item.mimeType);
+    // Use the DRIVE ITEM's name for the link file base name
+    const base_name = drive_item.name; // Assumes name doesn't contain path separators like '/'
+    const link_file_name = `${base_name}${link_suffix}`;
+    // Place it in the same directory as the target content file
+    const content_dir = path.dirname(target_content_local_path);
+    const link_file_path = path.join(content_dir, link_file_name);
+
     core.info(`Creating/Updating GDrive link file: ${link_file_path} for '${drive_item.name}' (ID: ${drive_item.id})`);
     const link_data = {
       id: drive_item.id,
@@ -130,6 +95,7 @@ export async function handle_download_item(
       name: drive_item.name,
       modifiedTime: drive_item.modifiedTime
     };
+    await fs.promises.mkdir(content_dir, { recursive: true }); // Ensure dir exists
     await fs.promises.writeFile(link_file_path, JSON.stringify(link_data, null, 2));
     linkFilePath = link_file_path;
   }
@@ -141,6 +107,10 @@ export async function handle_download_item(
     // Download content for PDFs and other binary files
     core.info(`File '${drive_item.name}' (ID: ${drive_item.id}) is not a Google Doc type. Downloading content.`);
     try {
+      // Ensure directory exists before downloading
+      const content_dir = path.dirname(target_content_local_path);
+      await fs.promises.mkdir(content_dir, { recursive: true });
+
       core.debug(`Downloading Drive file content ID ${drive_item.id} to local path ${target_content_local_path}`);
       const response = await drive.files.get(
         { fileId: drive_item.id, alt: "media" },
@@ -148,7 +118,10 @@ export async function handle_download_item(
       );
       const dest = fs.createWriteStream(target_content_local_path);
       await new Promise<void>((resolve, reject) => {
-        response.data.pipe(dest);
+        if (!response.data || typeof (response.data as any).pipe !== 'function') {
+          return reject(new Error(`Drive API did not return a readable stream for file ID ${drive_item.id}.`));
+        }
+        (response.data as NodeJS.ReadableStream).pipe(dest);
         dest.on("finish", resolve);
         dest.on("error", (err) => reject(err));
       });
@@ -156,6 +129,8 @@ export async function handle_download_item(
       contentFilePath = target_content_local_path;
     } catch (error) {
       core.error(`Failed to download content for ${drive_item.name} (ID: ${drive_item.id}): ${(error as Error).message}`);
+      // Attempt to cleanup partial download
+      await fs.promises.rm(target_content_local_path, { force: true, recursive: false }).catch(() => { });
       throw error;
     }
   }
@@ -163,16 +138,19 @@ export async function handle_download_item(
   return { linkFilePath, contentFilePath };
 }
 
-
-// --- upload_file (already correct from previous answer) ---
+// --- upload_file ---
 /**
- * Uploads a local file to Google Drive, skipping .gdrive.json files.
+ * Uploads a local file to Google Drive, skipping link files (e.g., *.doc.gdrive.json).
  * Can create a new file or update an existing one.
  * @param local_file_path Absolute path to the local file.
  * @param target_folder_id Drive Folder ID where the file should be uploaded.
  * @param existing_drive_file Optional info for updating an existing file.
  * @returns Object with the Drive file ID and success status.
  */
+// Pre-compile regex for checking link files
+const known_extensions = Object.values(MIME_TYPE_TO_EXTENSION).join('|');
+const link_file_upload_regex = new RegExp(`\\.(${known_extensions})\\.gdrive\\.json$`);
+
 export async function upload_file(
   local_file_path: string,
   target_folder_id: string,
@@ -180,9 +158,10 @@ export async function upload_file(
 ): Promise<{ id: string; success: boolean }> {
   const local_file_name = path.basename(local_file_path);
 
-  // Skip uploading the .gdrive.json files themselves
-  if (local_file_name.endsWith('.gdrive.json')) {
+  // Skip uploading the link files themselves using the new pattern
+  if (link_file_upload_regex.test(local_file_name)) {
     core.info(`Skipping upload of GDrive link file: ${local_file_name}`);
+    // If we were updating, return the existing ID. Otherwise empty string.
     return { id: existing_drive_file?.id || '', success: true };
   }
 
@@ -196,17 +175,24 @@ export async function upload_file(
       if (existing_drive_file!.name !== local_file_name) {
         requestBody.name = local_file_name;
         core.info(`Updating file name for '${existing_drive_file!.name}' to '${local_file_name}' (ID: ${fileId})`);
+      } else {
+        core.info(`Updating existing file content '${local_file_name}' (ID: ${fileId}) in folder ${target_folder_id}`);
       }
-      core.info(`Updating existing file content '${local_file_name}' (ID: ${fileId}) in folder ${target_folder_id}`);
       const res = await drive.files.update({
-        fileId: fileId, media: media, requestBody: Object.keys(requestBody).length > 0 ? requestBody : undefined, fields: "id, name, md5Checksum",
+        fileId: fileId,
+        media: media,
+        // Only include requestBody if it has keys (i.e., name change)
+        requestBody: Object.keys(requestBody).length > 0 ? requestBody : undefined,
+        fields: "id, name, md5Checksum", // Always request fields
       });
       fileId = res.data.id!;
       core.info(`Updated file '${res.data.name}' (ID: ${fileId}). New hash: ${res.data.md5Checksum || 'N/A'}`);
     } else { // create
       core.info(`Creating new file '${local_file_name}' in folder ${target_folder_id}`);
       const res = await drive.files.create({
-        requestBody: { name: local_file_name, parents: [target_folder_id] }, media: media, fields: "id, name, md5Checksum",
+        requestBody: { name: local_file_name, parents: [target_folder_id] },
+        media: media,
+        fields: "id, name, md5Checksum",
       });
       if (!res.data.id) { throw new Error(`File creation API call did not return an ID for '${local_file_name}'.`); }
       fileId = res.data.id;
@@ -217,6 +203,7 @@ export async function upload_file(
     const err = error as any;
     core.warning(`Failed to ${operation} file '${local_file_name}' in folder ${target_folder_id}: ${err.message}`);
     if (err.response?.data) { core.warning(`API Error Details: ${JSON.stringify(err.response.data)}`); }
+    // Ensure we return an ID if it was an update attempt, even if it failed
     return { id: operation === 'update' ? fileId || '' : '', success: false };
   }
 }
