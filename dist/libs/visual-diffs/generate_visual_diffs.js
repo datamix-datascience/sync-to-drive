@@ -6,6 +6,7 @@ import { Buffer } from 'buffer';
 import { execute_git } from '../git.js'; // Use existing git helper
 import { convert_pdf_to_pngs } from './pdf_converter.js';
 import { fetch_drive_file_as_pdf } from './google_drive_fetch.js';
+import { MIME_TYPE_TO_EXTENSION } from '../google-drive/file_types.js'; // Import the map
 const SKIP_CI_TAG = '[skip visual-diff]'; // Specific tag for this step
 /**
  * Checks the latest commit message on the specified branch for a skip tag.
@@ -56,14 +57,16 @@ async function commit_and_push_pngs(params, commit_message) {
         // Ensure we are on the correct branch
         core.info(`Checking out branch '${params.head_branch}'...`);
         await execute_git('fetch', ['origin', params.head_branch], { silent: true });
-        await execute_git('checkout', [params.head_branch]);
+        await execute_git('checkout', ["--force", params.head_branch]); // Force checkout
         // Configure Git user
         await execute_git("config", ["--local", "user.email", params.git_user_email]);
         await execute_git("config", ["--local", "user.name", params.git_user_name]);
         core.info(`Adding generated files in '${params.output_base_dir}' to Git index...`);
+        // Add the specific output directory to avoid unrelated changes
         await execute_git('add', [params.output_base_dir]);
-        // Check if there are staged changes
-        const status_result = await execute_git('status', ['--porcelain', '--', params.output_base_dir], { ignoreReturnCode: true });
+        // Check if there are staged changes *within the output directory*
+        const status_result = await execute_git('status', ['--porcelain', '--', params.output_base_dir], // Limit status check to the output dir
+        { ignoreReturnCode: true });
         if (!status_result.stdout.trim()) {
             core.info(`No staged changes detected within '${params.output_base_dir}'. Nothing to commit.`);
             core.endGroup();
@@ -71,10 +74,12 @@ async function commit_and_push_pngs(params, commit_message) {
         }
         core.debug("Staged changes detected:\n" + status_result.stdout);
         core.info('Committing changes...');
-        await execute_git('commit', ['-m', commit_message]);
+        // Commit only the added files within the output directory implicitly via `git add` above
+        // or explicitly commit the path: await execute_git('commit', ['-m', commit_message, '--', params.output_base_dir]);
+        await execute_git('commit', ['-m', commit_message]); // Commits all staged changes
         core.info(`Pushing changes to branch ${params.head_branch}...`);
-        // Use --force-with-lease to avoid overwriting unrelated changes
-        await execute_git('push', ['--force-with-lease', 'origin', params.head_branch]);
+        // Use --force-with-lease to avoid overwriting unrelated changes if possible, but may need --force if history diverged significantly
+        await execute_git('push', ['--force', 'origin', params.head_branch]); // Using --force for simplicity as this branch is action-managed
         core.info('Changes pushed successfully.');
     }
     catch (error) {
@@ -92,10 +97,12 @@ export async function generate_visual_diffs_for_pr(params) {
     core.startGroup(`Generating Visual Diffs for PR #${params.pr_number}`);
     core.info(`Repo: ${params.owner}/${params.repo}`);
     core.info(`Branch: ${params.head_branch} (SHA: ${params.head_sha})`);
-    core.info(`Looking for link files ending with: ${params.link_file_suffix}`);
+    // Link file suffix input might be less relevant now, but we log it. The code uses regex based on types.
+    core.info(`Looking for link files matching type patterns (e.g., *.doc.gdrive.json, *.pdf.gdrive.json)`);
     core.info(`Outputting PNGs to directory: ${params.output_base_dir}`);
     core.info(`PNG Resolution: ${params.resolution_dpi} DPI`);
     // Debug current branch and HEAD
+    // ... (debug git state logic remains the same) ...
     core.info('Debugging current Git state...');
     const currentBranch = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
     core.info(`Current branch: ${currentBranch.stdout.trim()}`);
@@ -111,9 +118,8 @@ export async function generate_visual_diffs_for_pr(params) {
     }
     // --- Ensure output directory is clean or exists ---
     try {
-        core.info(`Ensuring output directory exists and is potentially cleaned: ${params.output_base_dir}`);
-        // Optional: Clean the directory first? Be careful if it contains other things.
-        // await fs.promises.rm(params.output_base_dir, { recursive: true, force: true });
+        core.info(`Ensuring output directory exists: ${params.output_base_dir}`);
+        // Consider cleaning only specific subdirs related to changed files later if needed
         await fs.promises.mkdir(params.output_base_dir, { recursive: true });
     }
     catch (dirError) {
@@ -124,26 +130,32 @@ export async function generate_visual_diffs_for_pr(params) {
     // --- Find Changed Link Files in PR ---
     core.startGroup('Finding Changed Link Files in PR');
     const changed_link_files = [];
+    // Pre-compile regex based on known extensions
+    const known_extensions_vd = Object.values(MIME_TYPE_TO_EXTENSION).join('|');
+    const link_file_regex_vd = new RegExp(`\\.(${known_extensions_vd})\\.gdrive\\.json$`);
+    core.debug(`Using regex to find link files: ${link_file_regex_vd}`);
     try {
         const files_iterator = params.octokit.paginate.iterator(params.octokit.rest.pulls.listFiles, {
             owner: params.owner, repo: params.repo, pull_number: params.pr_number, per_page: 100,
         });
         for await (const { data: files } of files_iterator) {
             for (const file of files) {
-                // Process files that are added or modified and end with the specified suffix
-                if (file.filename.endsWith(params.link_file_suffix) &&
+                // Check if file is added/modified AND matches the link file pattern
+                const match = file.filename.match(link_file_regex_vd);
+                if (match &&
                     (file.status === 'added' || file.status === 'modified')) {
-                    // base_name is the filename without the suffix, used for the output sub-folder
-                    const base_name = path.basename(file.filename, params.link_file_suffix);
+                    const matched_suffix = match[0]; // e.g., ".doc.gdrive.json"
+                    // base_name is the filename without the type and suffix, used for output sub-folder name
+                    const base_name = path.basename(file.filename, matched_suffix);
                     core.info(` -> Found candidate: ${file.filename} (Status: ${file.status}) -> Output Base: ${base_name}`);
                     changed_link_files.push({ path: file.filename, base_name });
                 }
                 else {
-                    core.debug(` -> Skipping file: ${file.filename} (Status: ${file.status}, Suffix mismatch: ${!file.filename.endsWith(params.link_file_suffix)})`);
+                    core.debug(` -> Skipping file: ${file.filename} (Status: ${file.status}, Pattern mismatch: ${!match})`);
                 }
             }
         }
-        core.info(`Found ${changed_link_files.length} added/modified link file(s) to process.`);
+        core.info(`Found ${changed_link_files.length} added/modified link file(s) matching pattern to process.`);
     }
     catch (error) {
         core.error(`Failed to list PR files: ${error.message}`);
@@ -159,6 +171,7 @@ export async function generate_visual_diffs_for_pr(params) {
         return;
     }
     // --- Setup Temporary Directory ---
+    // ... (temp dir logic remains the same) ...
     let temp_dir = null;
     try {
         temp_dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), `visual-diff-${params.pr_number}-`));
@@ -190,7 +203,8 @@ export async function generate_visual_diffs_for_pr(params) {
                 if (file_data && typeof file_data.id === 'string' && typeof file_data.mimeType === 'string') {
                     file_id = file_data.id;
                     mime_type = file_data.mimeType;
-                    original_name = typeof file_data.name === 'string' ? file_data.name : path.basename(link_file.base_name); // Use base name as fallback
+                    // Use name from JSON if available, otherwise fallback to base_name derived from link file path
+                    original_name = typeof file_data.name === 'string' ? file_data.name : link_file.base_name;
                     core.info(`   - Extracted Drive ID: ${file_id}, MIME Type: ${mime_type}${original_name ? `, Name: ${original_name}` : ''}`);
                 }
                 else {
@@ -228,12 +242,16 @@ export async function generate_visual_diffs_for_pr(params) {
             continue; // Skip to the next link file
         }
         // 3. Convert PDF to PNGs
-        // Output path structure: output_base_dir / <relative_path_of_link_file_dir> / <base_name_from_link_file> / page.png
+        // Output path structure: output_base_dir / <relative_path_of_link_file_dir> / <base_name_from_link_file> / page_num.png
         const relative_dir = path.dirname(link_file.path); // e.g., "docs/subdir" or "."
-        // Use link_file.base_name which is derived directly from the link file's path structure
+        // Use link_file.base_name which is now correctly extracted without the type+suffix
         const image_output_dir_relative_path = path.join(relative_dir, link_file.base_name);
         const image_output_dir_absolute_path = path.join(params.output_base_dir, image_output_dir_relative_path);
         core.info(`   - Converting PDF to PNGs in directory: ${image_output_dir_absolute_path} (relative: ${image_output_dir_relative_path})`);
+        // Optional: Clean the specific output directory before generating new PNGs
+        // core.debug(`   - Cleaning output directory: ${image_output_dir_absolute_path}`);
+        // await fs.promises.rm(image_output_dir_absolute_path, { recursive: true, force: true });
+        // await fs.promises.mkdir(image_output_dir_absolute_path, { recursive: true }); // Recreate after cleaning
         const generated_pngs = await convert_pdf_to_pngs(temp_pdf_path, image_output_dir_absolute_path, params.resolution_dpi);
         if (generated_pngs.length > 0) {
             total_pngs_generated += generated_pngs.length;
@@ -249,6 +267,7 @@ export async function generate_visual_diffs_for_pr(params) {
     } // End loop through link files
     core.endGroup(); // End 'Processing Files' group
     // --- Cleanup Temp Directory ---
+    // ... (temp dir cleanup remains the same) ...
     if (temp_dir) {
         core.info(`Cleaning up temporary directory: ${temp_dir}`);
         await fs.promises.rm(temp_dir, { recursive: true, force: true }).catch(rmErr => core.warning(`Failed to remove base temp directory ${temp_dir}: ${rmErr.message}`));
@@ -260,6 +279,7 @@ export async function generate_visual_diffs_for_pr(params) {
         try {
             await commit_and_push_pngs(params, commit_message);
             // Debug post-commit state
+            // ... (post-commit debug logic remains the same) ...
             core.info('Debugging post-commit Git state...');
             const postCommitBranch = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
             core.info(`Post-commit branch: ${postCommitBranch.stdout.trim()}`);
@@ -270,6 +290,7 @@ export async function generate_visual_diffs_for_pr(params) {
         }
         catch (commitError) {
             core.error("Visual diff generation succeeded, but committing/pushing PNGs failed.");
+            // Decide if this should fail the whole action
             throw commitError;
         }
     }
