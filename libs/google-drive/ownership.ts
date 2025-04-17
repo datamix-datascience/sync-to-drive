@@ -38,16 +38,21 @@ export async function accept_ownership_transfers(file_id: string) {
     for (const perm of pending_permissions) {
       core.info(`Accepting ownership transfer for item ${file_id}, permission ID: ${perm.id}`);
       try {
-        await drive.permissions.update({
+        const updated_permission = await drive.permissions.update({
           fileId: file_id,
           permissionId: perm.id,
           // Transfer ownership needs an empty request body when accepting
-          requestBody: {}, // DO NOT set role here, it breaks the acceptance
+          requestBody: { role: 'owner' },
           transferOwnership: true, // The key parameter
-          fields: "id, role", // Request fields for confirmation
+          fields: "id, role, pendingOwner", // Request fields for confirmation
         });
-        core.info(`Ownership accepted for item ${file_id}`);
-        ownership_transfer_requested_ids.delete(file_id); // Remove from pending set
+        core.info(`Ownership acceptance call returned for item ${file_id}. New Role: ${updated_permission.data.role}, Pending: ${updated_permission.data.pendingOwner}`);
+        if (updated_permission.data.role === 'owner' && !updated_permission.data.pendingOwner) {
+          core.info(`Ownership confirmed accepted for item ${file_id}`);
+          ownership_transfer_requested_ids.delete(file_id); // Remove from pending set
+        } else {
+          core.warning(`Ownership acceptance might not be complete for ${file_id}. Role: ${updated_permission.data.role}, Pending: ${updated_permission.data.pendingOwner}`);
+        }
       } catch (updateError) {
         core.warning(`Failed to accept ownership for item ${file_id} (Permission ${perm.id}): ${(updateError as Error).message}`);
         // Continue to check other permissions or children
