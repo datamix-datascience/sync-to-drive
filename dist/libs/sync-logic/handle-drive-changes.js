@@ -204,7 +204,6 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                         // Don't set needs_processing here based *only* on missing hash. ModifiedTime check will handle it.
                     }
                 }
-                core.debug(`🔥🔥🔥`);
                 // Check link file, regardless of content state (might need update even if content matches)
                 if (!local_link_info) {
                     core.debug(` -> Reason Check 3: Missing local link file ('${expected_link_path}').`);
