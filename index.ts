@@ -286,7 +286,7 @@ async function sync_main() {
         // Pass the original trigger event name and the untrack action config
         // Store the result which might contain PR details
         // Note: handle_drive_changes includes its own Drive list and comparison logic, optimized separately
-        pr_details = await handle_drive_changes(folder_id, on_untrack_action, trigger_event_name);
+        pr_details = await handle_drive_changes(folder_id, on_untrack_action, trigger_event_name, git_user_name, git_user_email);
       } else {
         core.warning("Skipping Step 4 (Incoming Changes Check) due to failures in previous steps.");
       }
