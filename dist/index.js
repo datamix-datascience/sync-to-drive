@@ -70,7 +70,12 @@ async function sync_main() {
                 let initial_list_found_unowned = false; // Flag for ownership check optimization
                 try {
                     const drive_data = await list_drive_files_recursively(folder_id); // <<< LIST ONCE
-                    drive_files_map = new Map(Array.from(drive_data.files.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
+                    // Create drive_files_map from drive_data.files array
+                    drive_files_map = new Map(drive_data.files.map((file) => [
+                        file.path.replace(/\\/g, '/'), // Normalize path to use forward slashes
+                        file.item, // The DriveItem (file object)
+                    ]));
+                    // Create drive_folders_map from drive_data.folders (assuming it's similar)
                     drive_folders_map = new Map(Array.from(drive_data.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
                     // Check ownership during initial list processing to optimize Step 3
                     core.debug("Checking ownership of listed Drive items...");

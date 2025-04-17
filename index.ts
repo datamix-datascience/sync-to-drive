@@ -81,8 +81,17 @@ async function sync_main() {
 
         try {
           const drive_data = await list_drive_files_recursively(folder_id); // <<< LIST ONCE
-          drive_files_map = new Map(Array.from(drive_data.files.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
-          drive_folders_map = new Map(Array.from(drive_data.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item]));
+          // Create drive_files_map from drive_data.files array
+          drive_files_map = new Map(
+            drive_data.files.map((file) => [
+              file.path.replace(/\\/g, '/'), // Normalize path to use forward slashes
+              file.item, // The DriveItem (file object)
+            ])
+          );
+          // Create drive_folders_map from drive_data.folders (assuming it's similar)
+          drive_folders_map = new Map(
+            Array.from(drive_data.folders.entries()).map(([p, item]) => [p.replace(/\\/g, '/'), item])
+          );
 
           // Check ownership during initial list processing to optimize Step 3
           core.debug("Checking ownership of listed Drive items...");
@@ -105,7 +114,6 @@ async function sync_main() {
           // Set the flag for Step 3 based on this check
           needs_recursive_ownership_check = initial_list_found_unowned;
           core.info(`Initial Drive state: ${drive_files_map.size} files, ${drive_folders_map.size} folders. Needs recursive ownership check: ${needs_recursive_ownership_check}`);
-
         } catch (listError) {
           core.error(`Failed list Drive content: ${(listError as Error).message}. Skipping outgoing sync steps.`);
           operation_failed = true;
