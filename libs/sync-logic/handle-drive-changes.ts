@@ -235,6 +235,9 @@ export async function handle_drive_changes(
         const drive_dir = path.dirname(drive_path);
         const expected_link_path = drive_dir === '.' ? `${base_name}${link_suffix}` : path.join(drive_dir, `${base_name}${link_suffix}`).replace(/\\/g, '/');
         const expected_link_info = expected_local_files.get(expected_link_path);
+        if (expected_local_files.has(expected_link_path)) {
+          core.warning(`Duplicate link file path detected: ${expected_link_path} for Drive ID ${drive_item.id}. Consider renaming files in Google Drive to avoid conflicts.`);
+        }
 
         // Ensure the mapping points back to the *current* drive_item ID
         if (expected_link_info && expected_link_info.driveItem.id === drive_item.id) {
