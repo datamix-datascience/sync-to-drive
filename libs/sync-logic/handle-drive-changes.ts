@@ -93,7 +93,7 @@ export async function handle_drive_changes(
   const local_paths_identified_for_deletion = new Set<string>();
 
   try {
-    // ... (Step 1: Create temporary state branch - remains the same) ...
+    // Step 1: Create temporary state branch
     original_state_branch = `original-state-${folder_id}-${run_id}`;
     core.info(`Initial branch is '${initial_branch}'. Creating temporary state branch '${original_state_branch}'`);
     const initial_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
@@ -101,7 +101,7 @@ export async function handle_drive_changes(
     await execute_git("checkout", ["-b", original_state_branch, initial_commit_hash]);
 
 
-    // ... (Step 2: List local files from original state - remains the same) ...
+    // Step 2: List local files from original state
     core.info("Listing local files from original state branch...");
     const initial_local_files_list = await list_local_files(".");
     const initial_local_map = new Map(initial_local_files_list.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
