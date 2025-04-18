@@ -153,10 +153,9 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     throw dirError; // Cannot proceed without output dir
   }
 
-
   // --- Find Changed Link Files in PR ---
   core.startGroup('Finding Changed Link Files in PR');
-  const changed_link_files: { path: string; base_name: string }[] = [];
+  const changed_link_files: { path: string; base_name: string; file_type: string }[] = [];
   // Pre-compile regex based on known extensions
   const known_extensions_vd = Object.values(MIME_TYPE_TO_EXTENSION).join('|');
   const link_file_regex_vd = new RegExp(`\\.(${known_extensions_vd})\\.gdrive\\.json$`);
@@ -175,11 +174,12 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
           match &&
           (file.status === 'added' || file.status === 'modified' || file.status === 'renamed')
         ) {
-          const matched_suffix = match[0]; // e.g., ".doc.gdrive.json"
-          // base_name is the filename without the type and suffix, used for output sub-folder name
-          const base_name = path.basename(file.filename, matched_suffix);
-          core.info(` -> Found candidate: ${file.filename} (Status: ${file.status}) -> Output Base: ${base_name}`);
-          changed_link_files.push({ path: file.filename, base_name });
+          const matched_suffix = match[0]; // e.g., ".doc.gdrive.json" or ".pdf.pdf.gdrive.json"
+          const file_type = match[1]; // Keep as is: "doc" or "pdf.pdf"
+          // base_name is the filename without .gdrive.json, preserving full extension (e.g., "test-genai.pdf.pdf")
+          const base_name = path.basename(file.filename, '.gdrive.json');
+          core.info(` -> Found candidate: ${file.filename} (Status: ${file.status}) -> Output Base: ${base_name} (Type: ${file_type})`);
+          changed_link_files.push({ path: file.filename, base_name, file_type });
         } else {
           core.debug(` -> Skipping file: ${file.filename} (Status: ${file.status}, Pattern mismatch: ${!match})`);
         }
@@ -201,7 +201,6 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   }
 
   // --- Setup Temporary Directory ---
-  // ... (temp dir logic remains the same) ...
   let temp_dir: string | null = null;
   try {
     temp_dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), `visual-diff-${params.pr_number}-`));
@@ -220,74 +219,68 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     core.info(`Processing link file: ${link_file.path}`);
     let file_id: string | null = null;
     let mime_type: string | null = null;
-    let original_name: string | null = null; // Store original name for context
+    let original_name: string | null = null; // Store original name for folder naming
 
     // 1. Get File ID and MIME Type from link file content (using head_sha)
     try {
       core.debug(`Fetching content for: ${link_file.path} at ref ${params.head_sha}`);
       const { data: content_response } = await params.octokit.rest.repos.getContent({
-        owner: params.owner, repo: params.repo, path: link_file.path, ref: params.head_sha, // Fetch from the specific commit
+        owner: params.owner, repo: params.repo, path: link_file.path, ref: params.head_sha,
       });
 
-      // Type guard to ensure response has content
       if ('content' in content_response && content_response.content && content_response.encoding === 'base64') {
         const file_content_str = Buffer.from(content_response.content, 'base64').toString('utf-8');
         const file_data = JSON.parse(file_content_str);
         if (file_data && typeof file_data.id === 'string' && typeof file_data.mimeType === 'string') {
           file_id = file_data.id;
           mime_type = file_data.mimeType;
-          // Use name from JSON if available, otherwise fallback to base_name derived from link file path
-          original_name = typeof file_data.name === 'string' ? file_data.name : link_file.base_name;
-          core.info(`   - Extracted Drive ID: ${file_id}, MIME Type: ${mime_type}${original_name ? `, Name: ${original_name}` : ''}`);
+          // Use name from JSON if available, otherwise fallback to base_name
+          original_name = typeof file_data.name === 'string' && file_data.name.trim() ? file_data.name.trim() : link_file.base_name;
+          core.info(`   - Extracted Drive ID: ${file_id}, MIME Type: ${mime_type}, Name: ${original_name}`);
         } else {
           core.warning(`   - Could not find 'id' and 'mimeType' (both strings) in JSON content of ${link_file.path}. Skipping.`);
-          continue; // Skip this file
+          continue;
         }
       } else {
         core.warning(`   - Could not retrieve valid base64 content for ${link_file.path} (SHA: ${params.head_sha}). Skipping.`);
-        continue; // Skip this file
+        continue;
       }
     } catch (error: any) {
-      // Handle case where file might not exist at head_sha (e.g., force-pushed over)
       if (error.status === 404) {
         core.warning(`   - Link file ${link_file.path} not found at ref ${params.head_sha}. It might have been moved or deleted. Skipping.`);
       } else {
         core.warning(`   - Failed to get or parse content of ${link_file.path} at ref ${params.head_sha}: ${error.message}. Skipping.`);
       }
-      continue; // Skip this file
+      continue;
     }
 
-    // Should have id and mimeType if we reached here
     if (!file_id || !mime_type || !original_name) {
       core.error(`Logic error: file_id, mime_type, or original_name missing after successful parse for ${link_file.path}`);
       continue;
     }
 
-
     // 2. Fetch PDF content from Drive
-    // Sanitize the original name for use in the temporary file path
-    const sanitized_base_name = original_name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    // Sanitize original_name for filesystem safety, preserving extensions
+    const sanitized_base_name = original_name.replace(/[^a-zA-Z0-9_. -]/g, '_').replace(/\s+/g, '_');
     const temp_pdf_path = path.join(temp_dir, `${sanitized_base_name}.pdf`);
 
     const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id, mime_type, temp_pdf_path);
 
     if (!fetch_success) {
       core.warning(`   - Failed to fetch PDF for ${link_file.path} (Drive ID: ${file_id}). Skipping PNG generation for this file.`);
-      continue; // Skip to the next link file
+      continue;
     }
 
     // 3. Convert PDF to PNGs
-    // Output path structure: output_base_dir / <relative_path_of_link_file_dir> / <base_name_from_link_file> / page_num.png
     const relative_dir = path.dirname(link_file.path); // e.g., "docs/subdir" or "."
-    // Use link_file.base_name which is now correctly extracted without the type+suffix
-    const image_output_dir_relative_path = path.join(relative_dir, link_file.base_name);
+    // Use sanitized original_name as the folder name to preserve full extension (e.g., "test-genai.pdf.pdf")
+    const image_output_dir_relative_path = path.join(relative_dir, sanitized_base_name);
     const image_output_dir_absolute_path = path.join(params.output_base_dir, image_output_dir_relative_path);
 
     core.info(`   - Converting PDF to PNGs in directory: ${image_output_dir_absolute_path} (relative: ${image_output_dir_relative_path})`);
-    // Optional: Clean the specific output directory before generating new PNGs
-    // core.debug(`   - Cleaning output directory: ${image_output_dir_absolute_path}`);
-    // await fs.promises.rm(image_output_dir_absolute_path, { recursive: true, force: true });
-    // await fs.promises.mkdir(image_output_dir_absolute_path, { recursive: true }); // Recreate after cleaning
+    // Optional: Clean the specific output directory before generating new PNGs to avoid stale files
+    await fs.promises.rm(image_output_dir_absolute_path, { recursive: true, force: true });
+    await fs.promises.mkdir(image_output_dir_absolute_path, { recursive: true });
 
     const generated_pngs = await convert_pdf_to_pngs(temp_pdf_path, image_output_dir_absolute_path, params.resolution_dpi);
 
@@ -304,19 +297,16 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     await fs.promises.rm(temp_pdf_path, { force: true, recursive: false }).catch(rmErr =>
       core.warning(`   - Failed to remove temp PDF ${temp_pdf_path}: ${rmErr.message}`)
     );
-
   } // End loop through link files
   core.endGroup(); // End 'Processing Files' group
 
   // --- Cleanup Temp Directory ---
-  // ... (temp dir cleanup remains the same) ...
   if (temp_dir) {
     core.info(`Cleaning up temporary directory: ${temp_dir}`);
     await fs.promises.rm(temp_dir, { recursive: true, force: true }).catch(rmErr =>
       core.warning(`Failed to remove base temp directory ${temp_dir}: ${rmErr.message}`)
     );
   }
-
 
   core.info(`Total PNGs generated in this run: ${total_pngs_generated}`);
 
