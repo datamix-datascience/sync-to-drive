@@ -36,6 +36,10 @@ inputs:
     description: "Git user email for commits made by the action."
     required: false
     default: "github-actions[bot]@users.noreply.github.com"
+  gemini_api_key:
+    description: "Google AI Gemini API Key for analyzing visual diffs."
+    required: false
+    default: ""
 
 runs:
   using: "node20"
