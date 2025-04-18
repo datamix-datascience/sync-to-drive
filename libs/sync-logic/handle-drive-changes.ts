@@ -294,7 +294,6 @@ export async function handle_drive_changes(
       }
     }
 
-    // ... (Identify Empty Folders for Deletion - logic remains the same using expected_local_files map) ...
     // Get all unique directory paths from the initial local map
     const initial_local_dirs = new Set<string>();
     initial_local_map.forEach((_, local_path) => {
@@ -338,7 +337,6 @@ export async function handle_drive_changes(
 
 
     // --- Step 5: Apply File System Changes ---
-    // ... (Logic remains the same, using drive_items_needing_processing and local_paths_identified_for_deletion) ...
     core.startGroup('Applying File System Changes');
     let changes_applied = false;
 
@@ -373,7 +371,6 @@ export async function handle_drive_changes(
 
 
     // --- Step 6: Stage, Commit, Push, and Create PR ---
-    // ... (Git configuration and staging logic remains the same) ...
     if (!changes_applied) {
       core.info("No file system changes were applied. Checking Git status anyway.");
     }
@@ -412,7 +409,6 @@ export async function handle_drive_changes(
     ].join("\n");
 
     try {
-      // ... (Commit, branch handling, push logic remains the same) ...
       core.info("Committing staged changes on temporary branch...");
       await execute_git("commit", ["-m", commit_message]);
       const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
@@ -477,7 +473,6 @@ export async function handle_drive_changes(
     core.error(`Error during Drive change handling for folder ${folder_id}: ${(error as Error).message}`);
     result = {};
   } finally {
-    // --- Cleanup logic remains the same ---
     core.startGroup(`Cleaning up Git State`);
     core.info(`Cleaning up temporary branch '${original_state_branch}' and returning to '${initial_branch}'`);
     try {

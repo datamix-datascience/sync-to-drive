@@ -300,7 +300,6 @@ async function sync_main() {
       }
 
       // *** STEP 5: Generate Visual Diffs (if enabled and PR was created/updated) ***
-      // Logic for this step remains the same
       if (enable_visual_diffs && pr_details.pr_number && pr_details.head_branch && !operation_failed) {
         core.info("Step 5: Generating visual diffs for the created/updated PR...");
         try {

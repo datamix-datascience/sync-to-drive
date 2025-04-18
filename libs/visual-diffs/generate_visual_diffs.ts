@@ -125,7 +125,6 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   core.info(`PNG Resolution: ${params.resolution_dpi} DPI`);
 
   // Debug current branch and HEAD
-  // ... (debug git state logic remains the same) ...
   core.info('Debugging current Git state...');
   const currentBranch = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
   core.info(`Current branch: ${currentBranch.stdout.trim()}`);
