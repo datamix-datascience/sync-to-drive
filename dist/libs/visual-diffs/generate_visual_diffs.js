@@ -102,7 +102,6 @@ export async function generate_visual_diffs_for_pr(params) {
     core.info(`Outputting PNGs to directory: ${params.output_base_dir}`);
     core.info(`PNG Resolution: ${params.resolution_dpi} DPI`);
     // Debug current branch and HEAD
-    // ... (debug git state logic remains the same) ...
     core.info('Debugging current Git state...');
     const currentBranch = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
     core.info(`Current branch: ${currentBranch.stdout.trim()}`);
@@ -185,37 +184,32 @@ export async function generate_visual_diffs_for_pr(params) {
     const processed_files_info = []; // Track info for commit message
     // --- Process Each Link File ---
     core.startGroup('Processing Files and Generating PNGs');
+    const file_metadata = [];
+    core.info('Collecting metadata for changed link files...');
     for (const link_file of changed_link_files) {
-        core.info(`Processing link file: ${link_file.path}`);
-        let file_id;
-        let mime_type;
-        let original_name; // Base name without extension
-        let folder_name; // Name used for output folder (with extension)
-        // 1. Get File ID and MIME Type from link file content (using head_sha)
+        core.info(`Collecting metadata for: ${link_file.path}`);
         try {
             core.debug(`Fetching content for: ${link_file.path} at ref ${params.head_sha}`);
             const { data: content_response } = await params.octokit.rest.repos.getContent({
-                owner: params.owner, repo: params.repo, path: link_file.path, ref: params.head_sha,
+                owner: params.owner,
+                repo: params.repo,
+                path: link_file.path,
+                ref: params.head_sha,
             });
             if ('content' in content_response && content_response.content && content_response.encoding === 'base64') {
                 const file_content_str = Buffer.from(content_response.content, 'base64').toString('utf-8');
                 const file_data = JSON.parse(file_content_str);
                 if (file_data && typeof file_data.id === 'string' && typeof file_data.mimeType === 'string') {
-                    file_id = file_data.id;
-                    mime_type = file_data.mimeType || 'unknown';
-                    // Use name from JSON if available, strip any known extensions to get the base name
-                    original_name = typeof file_data.name === 'string' && file_data.name.trim() ? file_data.name.trim() : link_file.base_name;
-                    // Remove any known extension from original_name to avoid duplication
-                    const extension_regex = new RegExp(`\\.(?:${Object.values(MIME_TYPE_TO_EXTENSION).join('|')})$`, 'i');
-                    original_name = original_name.replace(extension_regex, '');
-                    // Get the extension from MIME_TYPE_TO_EXTENSION
-                    const extension = (MIME_TYPE_TO_EXTENSION[mime_type] || link_file.file_type);
-                    // Construct folder_name by appending the MIME type's extension
-                    folder_name = `${original_name}.${extension}`;
-                    core.info(`   - Extracted Drive ID: ${file_id}, MIME Type: ${mime_type}, Original Name: ${original_name}, Folder Name: ${folder_name}`);
+                    const file_id = file_data.id;
+                    const mime_type = file_data.mimeType;
+                    const original_name = (typeof file_data.name === 'string' && file_data.name.trim() ? file_data.name.trim() : link_file.base_name).replace(new RegExp(`\\.(?:${Object.values(MIME_TYPE_TO_EXTENSION).join('|')})$`, 'i'), '');
+                    const extension = MIME_TYPE_TO_EXTENSION[mime_type] || link_file.file_type;
+                    const modifiedTime = typeof file_data.modifiedTime === 'string' ? file_data.modifiedTime : undefined;
+                    file_metadata.push({ path: link_file.path, file_id, mime_type, original_name, extension, modifiedTime });
+                    core.info(`   - Collected: ID=${file_id}, MIME=${mime_type}, Name=${original_name}, Extension=${extension}, Modified=${modifiedTime || 'N/A'}`);
                 }
                 else {
-                    core.warning(`   - Could not find 'id' and 'mimeType' (both strings) in JSON content of ${link_file.path}. Skipping.`);
+                    core.warning(`   - Could not find 'id' and 'mimeType' in JSON content of ${link_file.path}. Skipping.`);
                     continue;
                 }
             }
@@ -233,22 +227,55 @@ export async function generate_visual_diffs_for_pr(params) {
             }
             continue;
         }
-        if (!file_id || !mime_type || !original_name || !folder_name) {
-            core.error(`Logic error: file_id, mime_type, original_name, or folder_name missing after successful parse for ${link_file.path}`);
-            continue;
+    }
+    // Phase 2: Detect duplicates and assign folder names
+    const name_type_map = {};
+    file_metadata.forEach((meta) => {
+        const key = `${meta.original_name}:${meta.mime_type}`;
+        if (!name_type_map[key])
+            name_type_map[key] = [];
+        name_type_map[key].push(meta);
+    });
+    const processed_metadata = [];
+    for (const key in name_type_map) {
+        const files = name_type_map[key];
+        if (files.length > 1) {
+            core.info(`Detected ${files.length} files with same name and type: ${key}`);
+            // Sort by modifiedTime (oldest first, nulls last)
+            files.sort((a, b) => {
+                if (!a.modifiedTime)
+                    return 1;
+                if (!b.modifiedTime)
+                    return -1;
+                return a.modifiedTime.localeCompare(b.modifiedTime);
+            });
+            files.forEach((meta, index) => {
+                const folder_name = index === 0 ? `${meta.original_name}.${meta.extension}` : `${meta.original_name}.${meta.file_id.slice(0, 8)}.${meta.extension}`;
+                processed_metadata.push({ meta, folder_name });
+                core.debug(`   - Assigned folder_name=${folder_name} for ${meta.path} (Modified=${meta.modifiedTime || 'N/A'}, Index=${index})`);
+            });
         }
-        // 2. Fetch PDF content from Drive
-        // Sanitize folder_name for filesystem safety, preserving extensions
+        else {
+            const meta = files[0];
+            const folder_name = `${meta.original_name}.${meta.extension}`;
+            processed_metadata.push({ meta, folder_name });
+            core.debug(`   - Assigned folder_name=${folder_name} for ${meta.path} (No duplicates)`);
+        }
+    }
+    // Phase 3: Process files with assigned folder names
+    for (const { meta, folder_name } of processed_metadata) {
+        core.info(`Processing file: ${meta.path} -> Folder: ${folder_name}`);
+        const { file_id, mime_type } = meta;
+        // Fetch PDF content from Drive
         const sanitized_base_name = folder_name.replace(/[^a-zA-Z0-9_. -]/g, '_').replace(/\s+/g, '_');
         const temp_pdf_path = path.join(temp_dir, `${sanitized_base_name}.pdf`);
         const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id, mime_type, temp_pdf_path);
         if (!fetch_success) {
-            core.warning(`   - Failed to fetch PDF for ${link_file.path} (Drive ID: ${file_id}). Skipping PNG generation for this file.`);
+            core.warning(`   - Failed to fetch PDF for ${meta.path} (Drive ID: ${file_id}). Skipping PNG generation for this file.`);
             continue;
         }
-        // 3. Convert PDF to PNGs
-        const relative_dir = path.dirname(link_file.path); // e.g., "docs/subdir" or "."
-        // Use sanitized_base_name (derived from folder_name) for the output folder
+        // Convert PDF to PNGs
+        const relative_dir = path.dirname(meta.path); // e.g., "docs/subdir" or "."
         const image_output_dir_relative_path = path.join(relative_dir, sanitized_base_name);
         const image_output_dir_absolute_path = path.join(params.output_base_dir, image_output_dir_relative_path);
         core.info(`   - Converting PDF to PNGs in directory: ${image_output_dir_absolute_path} (relative: ${image_output_dir_relative_path})`);
@@ -258,16 +285,16 @@ export async function generate_visual_diffs_for_pr(params) {
         const generated_pngs = await convert_pdf_to_pngs(temp_pdf_path, image_output_dir_absolute_path, params.resolution_dpi);
         if (generated_pngs.length > 0) {
             total_pngs_generated += generated_pngs.length;
-            processed_files_info.push(`'${link_file.path}' (${generated_pngs.length} pages)`);
-            core.info(`   - Generated ${generated_pngs.length} PNGs for ${link_file.path}`);
+            processed_files_info.push(`'${meta.path}' (${generated_pngs.length} pages)`);
+            core.info(`   - Generated ${generated_pngs.length} PNGs for ${meta.path}`);
         }
         else {
-            core.warning(`   - No PNGs generated from PDF for ${link_file.path}. Conversion might have failed.`);
+            core.warning(`   - No PNGs generated from PDF for ${meta.path}. Conversion might have failed.`);
         }
-        // 4. Clean up temporary PDF for this file
+        // Clean up temporary PDF for this file
         core.debug(`   - Removing temporary PDF: ${temp_pdf_path}`);
-        await fs.promises.rm(temp_pdf_path, { force: true, recursive: false }).catch(rmErr => core.warning(`   - Failed to remove temp PDF ${temp_pdf_path}: ${rmErr.message}`));
-    } // End loop through link files
+        await fs.promises.rm(temp_pdf_path, { force: true, recursive: false }).catch((rmErr) => core.warning(`   - Failed to remove temp PDF ${temp_pdf_path}: ${rmErr.message}`));
+    } // End loop through processed metadata
     core.endGroup(); // End 'Processing Files' group
     // --- Cleanup Temp Directory ---
     if (temp_dir) {

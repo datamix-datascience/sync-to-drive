@@ -70,14 +70,14 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
     const drive_items_for_pr_body = [];
     const local_paths_identified_for_deletion = new Set();
     try {
-        // ... (Step 1: Create temporary state branch - remains the same) ...
+        // Step 1: Create temporary state branch
         original_state_branch = `original-state-${folder_id}-${run_id}`;
         core.info(`Initial branch is '${initial_branch}'. Creating temporary state branch '${original_state_branch}'`);
         const initial_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
         if (!initial_commit_hash)
             throw new Error("Could not get initial commit hash.");
         await execute_git("checkout", ["-b", original_state_branch, initial_commit_hash]);
-        // ... (Step 2: List local files from original state - remains the same) ...
+        // Step 2: List local files from original state
         core.info("Listing local files from original state branch...");
         const initial_local_files_list = await list_local_files(".");
         const initial_local_map = new Map(initial_local_files_list.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
@@ -213,6 +213,9 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 const drive_dir = path.dirname(drive_path);
                 const expected_link_path = drive_dir === '.' ? `${base_name}${link_suffix}` : path.join(drive_dir, `${base_name}${link_suffix}`).replace(/\\/g, '/');
                 const expected_link_info = expected_local_files.get(expected_link_path);
+                if (expected_local_files.has(expected_link_path)) {
+                    core.warning(`Duplicate link file path detected: ${expected_link_path} for Drive ID ${drive_item.id}. Consider renaming files in Google Drive to avoid conflicts.`);
+                }
                 // Ensure the mapping points back to the *current* drive_item ID
                 if (expected_link_info && expected_link_info.driveItem.id === drive_item.id) {
                     const local_file_info = initial_local_map.get(expected_link_path);
@@ -270,7 +273,6 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 core.info(` -> Deletion identified for local path: ${local_path}`);
             }
         }
-        // ... (Identify Empty Folders for Deletion - logic remains the same using expected_local_files map) ...
         // Get all unique directory paths from the initial local map
         const initial_local_dirs = new Set();
         initial_local_map.forEach((_, local_path) => {
@@ -310,7 +312,6 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         core.info(`Identified ${local_paths_identified_for_deletion.size} local paths/folders for deletion.`);
         core.endGroup();
         // --- Step 5: Apply File System Changes ---
-        // ... (Logic remains the same, using drive_items_needing_processing and local_paths_identified_for_deletion) ...
         core.startGroup('Applying File System Changes');
         let changes_applied = false;
         // 5a. Apply Deletions
@@ -351,7 +352,6 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         }
         core.endGroup();
         // --- Step 6: Stage, Commit, Push, and Create PR ---
-        // ... (Git configuration and staging logic remains the same) ...
         if (!changes_applied) {
             core.info("No file system changes were applied. Checking Git status anyway.");
         }
@@ -387,7 +387,6 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             `Workflow Run ID: ${run_id}`
         ].join("\n");
         try {
-            // ... (Commit, branch handling, push logic remains the same) ...
             core.info("Committing staged changes on temporary branch...");
             await execute_git("commit", ["-m", commit_message]);
             const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
@@ -452,7 +451,6 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         result = {};
     }
     finally {
-        // --- Cleanup logic remains the same ---
         core.startGroup(`Cleaning up Git State`);
         core.info(`Cleaning up temporary branch '${original_state_branch}' and returning to '${initial_branch}'`);
         try {
