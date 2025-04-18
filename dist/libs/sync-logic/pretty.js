@@ -1,3 +1,4 @@
+import { MIME_TYPE_TO_EXTENSION } from "../google-drive/file_types.js";
 /**
  * Formats the Pull Request body with details about synced changes.
  * Now accepts DriveItems directly for added/updated list.
@@ -18,7 +19,8 @@ removed_local_paths // Changed parameter name for clarity
             // Use webViewLink if available, otherwise just show the name/id
             const link = item.webViewLink;
             // Display name, fall back to ID if name is missing
-            const name_display = `\`[${item.mimeType.split('.')[0]}] ${item.name || item.id}\``;
+            const extension = MIME_TYPE_TO_EXTENSION[item.mimeType];
+            const name_display = `\`[${extension}] ${item.name || item.id}\``;
             const line = link ? `*   [${name_display}](${link})` : `*   ${name_display}`;
             pr_body_lines.push(line);
         });
