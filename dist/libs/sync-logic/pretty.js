@@ -18,7 +18,7 @@ removed_local_paths // Changed parameter name for clarity
             // Use webViewLink if available, otherwise just show the name/id
             const link = item.webViewLink;
             // Display name, fall back to ID if name is missing
-            const name_display = `\`${item.name || item.id}\``;
+            const name_display = `\`[${item.mimeType.split('.')[0]}] ${item.name || item.id}\``;
             const line = link ? `*   [${name_display}](${link})` : `*   ${name_display}`;
             pr_body_lines.push(line);
         });
