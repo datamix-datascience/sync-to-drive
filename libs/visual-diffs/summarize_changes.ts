@@ -1,5 +1,5 @@
 import * as core from "@actions/core";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, createUserContent } from "@google/genai";
 import { Octokit } from "@octokit/rest";
 
 // Initialize Gemini API client
@@ -43,15 +43,59 @@ async function getPRChanges(
   }
 }
 
+// Function to get diff images
+async function getDiffImages(
+  files: any[]
+): Promise<{ inlineData: { mimeType: string; data: string } }[]> {
+  const diffImages = files
+    .filter(
+      (file) =>
+        file.filename.startsWith("_diff_") && file.filename.endsWith(".png")
+    )
+    .map(async (file) => {
+      // Download image from GitHub
+      const response = await fetch(file.raw_url);
+      const arrayBuffer = await response.arrayBuffer();
+      const base64Data = Buffer.from(arrayBuffer).toString("base64");
+
+      return {
+        inlineData: {
+          mimeType: "image/png",
+          data: base64Data,
+        },
+      };
+    });
+  return Promise.all(diffImages);
+}
+
 // Function to generate summary using Gemini
 async function generateSummary(
   genAI: GoogleGenAI,
-  changes: string
+  changes: string,
+  images: { inlineData: { mimeType: string; data: string } }[]
 ): Promise<string> {
   try {
     const response = await genAI.models.generateContent({
-      model: "gemini-2.0-flash-001",
-      contents: `以下のプルリクエストの変更内容を日本語で簡潔に要約してください。技術的な変更点を重視して説明してください：\n\n${changes}`,
+      model: "gemini-2.0-flash",
+      contents: createUserContent([
+        `以下のプルリクエストの変更内容と、スライドのプレビュー画像を確認して要約してください。
+日本語と英語の両方で出力してください。
+
+フォーマット：
+[日本語での要約]
+変更内容をここに記述
+
+[English Summary]
+Describe changes here
+
+変更内容：
+1. ファイルの変更点：
+${changes}
+
+2. スライドの変更点：
+添付された画像はスライドの差分を表しています。画像の内容から変更点を説明してください。`,
+        ...images,
+      ]),
     });
 
     if (!response.text) {
@@ -78,7 +122,7 @@ async function postSummaryToPR(
       owner,
       repo,
       issue_number: pr_number,
-      body: `## 🤖 変更内容の要約\n\n${summary}`,
+      body: `## 🤖 変更内容の要約 / Change Summary\n\n${summary}`,
     });
     core.info("Successfully posted summary to PR");
   } catch (error: any) {
@@ -99,10 +143,17 @@ export async function summarizePRChanges(
     const genAI = initializeGeminiAPI();
 
     core.info("Getting PR changes...");
+    const { data: pr } = await octokit.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: pr_number,
+    });
+
     const changes = await getPRChanges(octokit, owner, repo, pr_number);
+    const images = await getDiffImages(pr);
 
     core.info("Generating summary...");
-    const summary = await generateSummary(genAI, changes);
+    const summary = await generateSummary(genAI, changes, images);
 
     core.info("Posting summary to PR...");
     await postSummaryToPR(octokit, owner, repo, pr_number, summary);
