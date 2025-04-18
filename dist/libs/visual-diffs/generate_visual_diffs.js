@@ -146,9 +146,9 @@ export async function generate_visual_diffs_for_pr(params) {
                     (file.status === 'added' || file.status === 'modified' || file.status === 'renamed')) {
                     const matched_suffix = match[0]; // e.g., ".doc.gdrive.json" or ".pdf.pdf.gdrive.json"
                     const file_type = match[1]; // Keep as is: "doc" or "pdf.pdf"
-                    // base_name is the filename without .gdrive.json, preserving full extension (e.g., "test-genai.pdf.pdf")
-                    const base_name = path.basename(file.filename, '.gdrive.json');
-                    core.info(` -> Found candidate: ${file.filename} (Status: ${file.status}) -> Output Base: ${base_name} (Type: ${file_type})`);
+                    // base_name is the filename without the matched suffix (e.g., "test-genai")
+                    const base_name = path.basename(file.filename, matched_suffix);
+                    core.info(` -> Found candidate: ${file.filename} (Status: ${file.status}) -> Base Name: ${base_name} (Type: ${file_type})`);
                     changed_link_files.push({ path: file.filename, base_name, file_type });
                 }
                 else {
@@ -187,9 +187,10 @@ export async function generate_visual_diffs_for_pr(params) {
     core.startGroup('Processing Files and Generating PNGs');
     for (const link_file of changed_link_files) {
         core.info(`Processing link file: ${link_file.path}`);
-        let file_id = null;
-        let mime_type = null;
-        let original_name = null; // Store original name for folder naming
+        let file_id;
+        let mime_type;
+        let original_name; // Base name without extension
+        let folder_name; // Name used for output folder (with extension)
         // 1. Get File ID and MIME Type from link file content (using head_sha)
         try {
             core.debug(`Fetching content for: ${link_file.path} at ref ${params.head_sha}`);
@@ -201,10 +202,17 @@ export async function generate_visual_diffs_for_pr(params) {
                 const file_data = JSON.parse(file_content_str);
                 if (file_data && typeof file_data.id === 'string' && typeof file_data.mimeType === 'string') {
                     file_id = file_data.id;
-                    mime_type = file_data.mimeType;
-                    // Use name from JSON if available, otherwise fallback to base_name
+                    mime_type = file_data.mimeType || 'unknown';
+                    // Use name from JSON if available, strip any known extensions to get the base name
                     original_name = typeof file_data.name === 'string' && file_data.name.trim() ? file_data.name.trim() : link_file.base_name;
-                    core.info(`   - Extracted Drive ID: ${file_id}, MIME Type: ${mime_type}, Name: ${original_name}`);
+                    // Remove any known extension from original_name to avoid duplication
+                    const extension_regex = new RegExp(`\\.(?:${Object.values(MIME_TYPE_TO_EXTENSION).join('|')})$`, 'i');
+                    original_name = original_name.replace(extension_regex, '');
+                    // Get the extension from MIME_TYPE_TO_EXTENSION
+                    const extension = (MIME_TYPE_TO_EXTENSION[mime_type] || link_file.file_type);
+                    // Construct folder_name by appending the MIME type's extension
+                    folder_name = `${original_name}.${extension}`;
+                    core.info(`   - Extracted Drive ID: ${file_id}, MIME Type: ${mime_type}, Original Name: ${original_name}, Folder Name: ${folder_name}`);
                 }
                 else {
                     core.warning(`   - Could not find 'id' and 'mimeType' (both strings) in JSON content of ${link_file.path}. Skipping.`);
@@ -225,13 +233,13 @@ export async function generate_visual_diffs_for_pr(params) {
             }
             continue;
         }
-        if (!file_id || !mime_type || !original_name) {
-            core.error(`Logic error: file_id, mime_type, or original_name missing after successful parse for ${link_file.path}`);
+        if (!file_id || !mime_type || !original_name || !folder_name) {
+            core.error(`Logic error: file_id, mime_type, original_name, or folder_name missing after successful parse for ${link_file.path}`);
             continue;
         }
         // 2. Fetch PDF content from Drive
-        // Sanitize original_name for filesystem safety, preserving extensions
-        const sanitized_base_name = original_name.replace(/[^a-zA-Z0-9_. -]/g, '_').replace(/\s+/g, '_');
+        // Sanitize folder_name for filesystem safety, preserving extensions
+        const sanitized_base_name = folder_name.replace(/[^a-zA-Z0-9_. -]/g, '_').replace(/\s+/g, '_');
         const temp_pdf_path = path.join(temp_dir, `${sanitized_base_name}.pdf`);
         const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id, mime_type, temp_pdf_path);
         if (!fetch_success) {
@@ -240,11 +248,11 @@ export async function generate_visual_diffs_for_pr(params) {
         }
         // 3. Convert PDF to PNGs
         const relative_dir = path.dirname(link_file.path); // e.g., "docs/subdir" or "."
-        // Use sanitized original_name as the folder name to preserve full extension (e.g., "test-genai.pdf.pdf")
+        // Use sanitized_base_name (derived from folder_name) for the output folder
         const image_output_dir_relative_path = path.join(relative_dir, sanitized_base_name);
         const image_output_dir_absolute_path = path.join(params.output_base_dir, image_output_dir_relative_path);
         core.info(`   - Converting PDF to PNGs in directory: ${image_output_dir_absolute_path} (relative: ${image_output_dir_relative_path})`);
-        // Optional: Clean the specific output directory before generating new PNGs to avoid stale files
+        // Clean the specific output directory to avoid stale files
         await fs.promises.rm(image_output_dir_absolute_path, { recursive: true, force: true });
         await fs.promises.mkdir(image_output_dir_absolute_path, { recursive: true });
         const generated_pngs = await convert_pdf_to_pngs(temp_pdf_path, image_output_dir_absolute_path, params.resolution_dpi);
@@ -272,8 +280,6 @@ export async function generate_visual_diffs_for_pr(params) {
         const commit_message = `${SKIP_CI_TAG} Generate visual diff PNGs for PR #${params.pr_number}\n\nGenerates ${total_pngs_generated} PNG(s) for:\n- ${processed_files_info.join('\n- ')}`;
         try {
             await commit_and_push_pngs(params, commit_message);
-            // Debug post-commit state
-            // ... (post-commit debug logic remains the same) ...
             core.info('Debugging post-commit Git state...');
             const postCommitBranch = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
             core.info(`Post-commit branch: ${postCommitBranch.stdout.trim()}`);
@@ -284,7 +290,6 @@ export async function generate_visual_diffs_for_pr(params) {
         }
         catch (commitError) {
             core.error("Visual diff generation succeeded, but committing/pushing PNGs failed.");
-            // Decide if this should fail the whole action
             throw commitError;
         }
     }
