@@ -140,10 +140,10 @@ export async function generate_visual_diffs_for_pr(params) {
         });
         for await (const { data: files } of files_iterator) {
             for (const file of files) {
-                // Check if file is added/modified AND matches the link file pattern
+                // Check if file is added, modified, OR renamed AND matches the link file pattern
                 const match = file.filename.match(link_file_regex_vd);
                 if (match &&
-                    (file.status === 'added' || file.status === 'modified')) {
+                    (file.status === 'added' || file.status === 'modified' || file.status === 'renamed')) {
                     const matched_suffix = match[0]; // e.g., ".doc.gdrive.json"
                     // base_name is the filename without the type and suffix, used for output sub-folder name
                     const base_name = path.basename(file.filename, matched_suffix);
@@ -155,7 +155,7 @@ export async function generate_visual_diffs_for_pr(params) {
                 }
             }
         }
-        core.info(`Found ${changed_link_files.length} added/modified link file(s) matching pattern to process.`);
+        core.info(`Found ${changed_link_files.length} added/modified/renamed link file(s) matching pattern to process.`);
     }
     catch (error) {
         core.error(`Failed to list PR files: ${error.message}`);
