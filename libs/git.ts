@@ -1,6 +1,20 @@
 import * as core from "@actions/core";
 import { getExecOutput } from "@actions/exec";
 
+/**
+ * Represents the result of executing a Git command.
+ */
+export interface GitResult {
+  /** The standard output stream content as a string. */
+  stdout: string;
+
+  /** The standard error stream content as a string. */
+  stderr: string;
+
+  /** The exit code returned by the Git process. */
+  exitCode: number;
+}
+
 // Exec Git Helper
 export async function execute_git(command: string, args: string[], options: { ignoreReturnCode?: boolean, silent?: boolean, cwd?: string } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   core.debug(`Executing: git ${command} ${args.join(" ")} ${options.cwd ? `(in ${options.cwd})` : ''}`);
