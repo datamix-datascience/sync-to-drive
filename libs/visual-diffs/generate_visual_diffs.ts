@@ -69,7 +69,7 @@ async function commit_and_push_pngs(
     // Ensure we are on the correct branch
     core.info(`Checking out branch '${params.head_branch}'...`);
     await execute_git('fetch', ['origin', params.head_branch], { silent: true });
-    await execute_git('checkout', ["--force", params.head_branch]); // Force checkout
+    await execute_git('checkout', [params.head_branch]);
 
     // Configure Git user
     await execute_git("config", ["--local", "user.email", params.git_user_email]);
