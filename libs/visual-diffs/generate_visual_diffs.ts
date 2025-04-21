@@ -54,6 +54,7 @@ async function should_skip_generation(branch_name: string): Promise<boolean> {
     return false; // Default to not skipping if check fails
   }
 }
+
 /**
  * Stages, commits, and pushes changes within a specified directory.
  */
@@ -139,7 +140,6 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     return;
   }
 
-
   // --- Setup Git Environment ---
   core.startGroup(`Setting up Git environment for branch ${params.head_branch}`);
   try {
@@ -182,16 +182,13 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     throw dirError;
   }
 
-
   // --- Find Changed Link Files in PR ---
   core.startGroup('Finding Changed Link Files in PR');
-  const changed_link_files: { path: string; base_name: string; file_id: string; file_type: string }[] = []; // Added file_id
+  // Store just the path reported by GitHub API initially
+  const changed_link_file_paths: string[] = [];
   const known_extensions_vd = Object.values(MIME_TYPE_TO_EXTENSION).join('|');
-  // Updated regex to match the new pattern: --[ID].[type].gdrive.json
-  // Capture Group 1: Base name (non-greedy)
-  // Capture Group 2: File ID
-  // Capture Group 3: Type extension (e.g., doc, sheet, pdf)
-  const link_file_regex_vd = new RegExp(`^(.*?)--([a-zA-Z0-9_-]+)\\.(${known_extensions_vd})\\.gdrive\\.json$`, 'i');
+  // Regex still useful for *finding* the relevant files, even if we don't capture groups here
+  const link_file_regex_vd = new RegExp(`--[a-zA-Z0-9_-]+\\.(${known_extensions_vd})\\.gdrive\\.json$`, 'i');
   core.debug(`Using regex to find link files: ${link_file_regex_vd}`);
 
 
@@ -202,26 +199,19 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
 
     for await (const { data: files } of files_iterator) {
       for (const file of files) {
-        // Extract the filename itself from the full path
-        const filename_only = path.basename(file.filename);
-        const match = filename_only.match(link_file_regex_vd);
-
+        // Use the regex to test if the filename matches the expected link file pattern
         if (
-          match &&
+          link_file_regex_vd.test(path.basename(file.filename)) &&
           (file.status === 'added' || file.status === 'modified' || file.status === 'renamed')
         ) {
-          const base_name = match[1]; // Captured base name part
-          const file_id = match[2]; // Captured file ID part
-          const file_type = match[3]; // Captured type extension part (doc, sheet, etc.)
-          core.info(` -> Found candidate: ${file.filename} (Status: ${file.status}) -> Base Name: ${base_name}, ID: ${file_id}, Type: ${file_type}`);
-          // Store the full path from the PR file list
-          changed_link_files.push({ path: file.filename, base_name, file_id, file_type });
+          core.info(` -> Found candidate link file: ${file.filename} (Status: ${file.status})`);
+          changed_link_file_paths.push(file.filename); // Store the full path
         } else {
-          core.debug(` -> Skipping file: ${file.filename} (Status: ${file.status}, Pattern mismatch: ${!match})`);
+          core.debug(` -> Skipping file: ${file.filename} (Status: ${file.status}, Pattern mismatch: ${!link_file_regex_vd.test(path.basename(file.filename))})`);
         }
       }
     }
-    core.info(`Found ${changed_link_files.length} added/modified/renamed link file(s) matching pattern to process.`);
+    core.info(`Found ${changed_link_file_paths.length} added/modified/renamed link file(s) matching pattern to process.`);
   } catch (error: any) {
     core.error(`Failed to list PR files via GitHub API: ${error.message}`);
     core.endGroup();
@@ -230,7 +220,7 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     core.endGroup();
   }
 
-  if (changed_link_files.length === 0) {
+  if (changed_link_file_paths.length === 0) {
     core.info('No relevant changed link files found in this PR update. Nothing to generate or commit.');
     core.endGroup(); // Close the main group
     return;
@@ -254,138 +244,81 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   // --- Process Each Link File ---
   core.startGroup('Processing Files and Generating PNGs');
 
-  // Phase 1: Collect metadata for all link files
-  interface FileMetadata {
-    path: string; // Full path from PR list
-    file_id_from_name: string; // ID extracted from filename
+  // Phase 1: Collect metadata AND determine output path for each link file
+  interface ProcessedLinkInfo {
+    link_file_path: string; // Full path from PR list (e.g., docs/Report--ID.doc.gdrive.json)
+    png_output_relative_path: string; // Relative path for PNG folder (e.g., docs/Report--ID.doc)
     file_id_from_content: string; // ID read from JSON content
-    mime_type: string;
-    original_name_from_content: string; // Name read from JSON content
-    extension: string; // Type extension (doc, pdf)
-    base_name_from_name: string; // Base name extracted from filename
-    modifiedTime?: string;
+    mime_type: string; // Mime type from JSON content
   }
-  const file_metadata: FileMetadata[] = [];
-  core.info('Collecting metadata for changed link files...');
-  for (const link_file of changed_link_files) { // link_file now contains path, base_name, file_id, file_type
-    core.info(`Collecting metadata for: ${link_file.path}`);
+  const files_to_process: ProcessedLinkInfo[] = [];
+  core.info('Collecting metadata and calculating output paths...');
+  for (const link_file_path of changed_link_file_paths) {
+    core.info(`Preparing metadata for: ${link_file_path}`);
     try {
       // Read file content *from the local filesystem*
-      core.debug(`Reading local file content for: ${link_file.path}`);
+      core.debug(`Reading local file content for: ${link_file_path}`);
       let file_content_str: string;
       try {
-        file_content_str = await fs.promises.readFile(link_file.path, 'utf-8');
+        file_content_str = await fs.promises.readFile(link_file_path, 'utf-8');
       } catch (readFileError: any) {
         if (readFileError.code === 'ENOENT') {
-          core.warning(`   - Link file ${link_file.path} not found locally (deleted in PR?). Skipping.`);
-          continue;
+          core.warning(`   - Link file ${link_file_path} not found locally (deleted in PR?). Skipping.`);
+          continue; // Skip this file
         } else { throw readFileError; }
       }
 
       const file_data = JSON.parse(file_content_str);
 
       if (!file_data || typeof file_data.id !== 'string' || typeof file_data.mimeType !== 'string') {
-        core.warning(`   - Could not find 'id' and 'mimeType' in JSON content of ${link_file.path}. Skipping.`);
+        core.warning(`   - Could not find 'id' and 'mimeType' in JSON content of ${link_file_path}. Skipping.`);
         continue;
       }
 
-      // Basic consistency check between filename ID and content ID
-      if (file_data.id !== link_file.file_id) {
-        core.warning(`   - File ID mismatch for ${link_file.path}: Filename ID='${link_file.file_id}', Content ID='${file_data.id}'. Using content ID.`);
+      // Calculate the PNG output folder path directly from the link file path
+      // by stripping the final ".gdrive.json" suffix.
+      const png_output_relative_path = link_file_path.replace(/\.gdrive\.json$/i, '');
+      if (png_output_relative_path === link_file_path) {
+        // Sanity check - this should not happen if the regex found the file
+        core.error(`   - Failed to remove '.gdrive.json' suffix from ${link_file_path}. Skipping.`);
+        continue;
       }
 
-      const file_id_from_content = file_data.id;
-      const mime_type = file_data.mimeType;
-      // Prefer name from content, fall back to base name from filename if content name missing
-      const original_name_from_content = (typeof file_data.name === 'string' && file_data.name.trim()) ? file_data.name.trim() : link_file.base_name;
-      const extension = MIME_TYPE_TO_EXTENSION[mime_type] || link_file.file_type; // Use file_type extracted from regex as fallback
-      const modifiedTime = typeof file_data.modifiedTime === 'string' ? file_data.modifiedTime : undefined;
-
-      file_metadata.push({
-        path: link_file.path,
-        file_id_from_name: link_file.file_id,
-        file_id_from_content: file_id_from_content,
-        mime_type,
-        original_name_from_content: original_name_from_content,
-        extension,
-        base_name_from_name: link_file.base_name, // Keep for potential folder naming
-        modifiedTime
+      files_to_process.push({
+        link_file_path: link_file_path,
+        png_output_relative_path: png_output_relative_path,
+        file_id_from_content: file_data.id,
+        mime_type: file_data.mimeType,
       });
-      core.info(`   - Collected: ContentID=${file_id_from_content}, MIME=${mime_type}, ContentName=${original_name_from_content}, Ext=${extension}, Modified=${modifiedTime || 'N/A'}`);
+      core.info(`   - Ready to process: ContentID=${file_data.id}, MIME=${file_data.mimeType}, OutputPath=${png_output_relative_path}`);
 
     } catch (error: any) {
-      core.warning(`   - Failed to read or parse local content of ${link_file.path}: ${error.message}. Skipping.`);
+      core.warning(`   - Failed to read or parse local content of ${link_file_path}: ${error.message}. Skipping.`);
       core.debug(error.stack);
       continue;
     }
   } // End metadata collection loop
 
-  // Phase 2: Assign unique folder names (still useful for organizing PNGs)
-  // Use content name and extension as the primary key for grouping, but use ID for folder if names clash.
-  interface ProcessedMetadata { meta: FileMetadata; folder_name: string; }
-  const name_type_map: { [key: string]: FileMetadata[] } = {};
-  file_metadata.forEach((meta) => {
-    // Group by the name stored *inside* the link file and its type extension
-    const key = `${meta.original_name_from_content}:${meta.extension}`;
-    if (!name_type_map[key]) name_type_map[key] = [];
-    name_type_map[key].push(meta);
-  });
+  // Phase 2 (Removed): No complex folder name assignment needed anymore.
 
-  const processed_metadata: ProcessedMetadata[] = [];
-  core.info('Assigning output folder names...');
-  for (const key in name_type_map) {
-    const files_with_same_name_type = name_type_map[key];
-    if (files_with_same_name_type.length > 1) {
-      // Name/type clash based on content, need to disambiguate folder name
-      core.info(`Detected ${files_with_same_name_type.length} files resolving to content name/type: ${key}. Using file ID for folder name disambiguation.`);
-      // Sort by modified time (most recent first might be preferred, but let's stick to consistency)
-      files_with_same_name_type.sort((a, b) => {
-        // Sort primarily by modified time (desc), then by path as tie-breaker
-        const timeCompare = (b.modifiedTime || '').localeCompare(a.modifiedTime || '');
-        if (timeCompare !== 0) return timeCompare;
-        return a.path.localeCompare(b.path);
-      });
+  // Phase 3: Process files - Fetch PDF, Convert to PNGs
+  for (const file_info of files_to_process) {
+    core.info(`Processing file: ${file_info.link_file_path} -> Output Folder: ${file_info.png_output_relative_path}`);
+    const { link_file_path, png_output_relative_path, file_id_from_content, mime_type } = file_info;
 
-      files_with_same_name_type.forEach((meta, index) => {
-        // Use content name + extension for the first, add content ID for subsequent ones
-        const folder_name = index === 0
-          ? `${meta.original_name_from_content}.${meta.extension}`
-          : `${meta.original_name_from_content}--${meta.file_id_from_content}.${meta.extension}`; // Use content ID
-        processed_metadata.push({ meta, folder_name });
-        core.debug(`   - Assigned folder_name=${folder_name} for ${meta.path} (ContentID=${meta.file_id_from_content}, Index=${index})`);
-      });
-    } else {
-      // No name/type clash for this group based on content
-      const meta = files_with_same_name_type[0];
-      const folder_name = `${meta.original_name_from_content}.${meta.extension}`; // Use content name + extension
-      processed_metadata.push({ meta, folder_name });
-      core.debug(`   - Assigned folder_name=${folder_name} for ${meta.path} (No content name/type duplicates)`);
-    }
-  } // End folder name assignment loop
+    // Use the relative path's basename for the temp PDF name for clarity
+    const temp_pdf_basename = path.basename(png_output_relative_path);
+    const temp_pdf_path = path.join(temp_dir, `${temp_pdf_basename}.pdf`);
 
-  // --- Phase 3: Process files - Fetch PDF, Convert to PNGs ---
-  for (const { meta, folder_name } of processed_metadata) {
-    core.info(`Processing file: ${meta.path} -> Output Folder: ${folder_name}`);
-    // Use the file ID read from the JSON content for fetching
-    const file_id_to_fetch = meta.file_id_from_content;
-    const { mime_type } = meta;
-
-    // Sanitize the calculated folder name for filesystem use
-    const sanitized_folder_name = folder_name.replace(/[^a-zA-Z0-9_.-]/g, '_').replace(/\s+/g, '_');
-    const temp_pdf_path = path.join(temp_dir, `${sanitized_folder_name}.pdf`);
-
-    // IMPORTANT: Place PNGs relative to the *link file's* directory
-    const relative_dir_of_link_file = path.dirname(meta.path);
-    const image_output_dir_relative_path = path.join(relative_dir_of_link_file, sanitized_folder_name);
-    const image_output_dir_absolute_path = path.join(params.output_base_dir, image_output_dir_relative_path);
-
+    // Construct the absolute path for the final PNG output directory
+    const image_output_dir_absolute_path = path.join(params.output_base_dir, png_output_relative_path);
 
     // Fetch PDF
-    core.info(`   - Fetching Drive file ID ${file_id_to_fetch} (from content) as PDF...`);
-    const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id_to_fetch, mime_type, temp_pdf_path);
+    core.info(`   - Fetching Drive file ID ${file_id_from_content} (from content) as PDF...`);
+    const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id_from_content, mime_type, temp_pdf_path);
 
     if (!fetch_success) {
-      core.warning(`   - Failed to fetch PDF for ${meta.path}. Skipping PNG generation.`);
+      core.warning(`   - Failed to fetch PDF for ${link_file_path}. Skipping PNG generation.`);
       continue; // Skip to next file
     }
 
@@ -401,15 +334,15 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
 
       if (generated_pngs.length > 0) {
         total_pngs_generated += generated_pngs.length;
-        // Use the original link file path for the commit message info
-        processed_files_info.push(`'${meta.path}' (${generated_pngs.length} pages) -> ${image_output_dir_relative_path}`);
+        // Use the original link file path and the calculated relative PNG path for the commit message info
+        processed_files_info.push(`'${link_file_path}' (${generated_pngs.length} pages) -> ${png_output_relative_path}`);
         core.info(`   - Successfully generated ${generated_pngs.length} PNGs.`);
       } else {
-        core.warning(`   - No PNGs generated from PDF for ${meta.path}. PDF might be empty or conversion failed.`);
-        processed_files_info.push(`'${meta.path}' (0 pages) -> ${image_output_dir_relative_path}`);
+        core.warning(`   - No PNGs generated from PDF for ${link_file_path}. PDF might be empty or conversion failed.`);
+        processed_files_info.push(`'${link_file_path}' (0 pages) -> ${png_output_relative_path}`);
       }
     } catch (conversionError: any) {
-      core.error(`   - Failed during PDF->PNG conversion or directory handling for ${meta.path}: ${conversionError.message}`);
+      core.error(`   - Failed during PDF->PNG conversion or directory handling for ${link_file_path}: ${conversionError.message}`);
       core.debug(conversionError.stack);
     } finally {
       // Clean up temporary PDF
@@ -418,7 +351,7 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
         core.warning(`   - Failed to remove temp PDF ${temp_pdf_path}: ${rmErr.message}`)
       );
     }
-  } // End loop through processed metadata
+  } // End loop through files_to_process
   core.endGroup(); // End 'Processing Files' group
 
   // --- Cleanup Temporary Directory ---
@@ -432,7 +365,8 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   core.info(`Total PNGs generated or updated in this run: ${total_pngs_generated}`);
 
   // --- Commit and Push Changes ---
-  if (processed_metadata.length > 0) {
+  // Commit if we prepared files for processing (even if 0 PNGs resulted from a specific file)
+  if (files_to_process.length > 0) {
     const commit_message = `${SKIP_CI_TAG} Generate visual diff PNGs for PR #${params.pr_number}\n\nProcessed ${processed_files_info.length} file(s):\n- ${processed_files_info.join('\n- ')}`;
     try {
       await stage_commit_and_push_changes(
@@ -455,6 +389,7 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
       } catch (gitError: any) {
         core.warning(`Could not get post-commit git debug info: ${gitError.message}`);
       }
+
 
     } catch (commitError) {
       core.error("Visual diff generation process completed, but committing/pushing changes failed.");
