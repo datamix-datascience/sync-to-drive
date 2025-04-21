@@ -4,14 +4,16 @@ export const GOOGLE_DOC_MIME_TYPES = [
   "application/vnd.google-apps.presentation",
   "application/vnd.google-apps.drawing",
   "application/vnd.google-apps.script",
-  // not PDFable?
+  // Export as PDF not support
   "application/vnd.google-apps.form",
   "application/vnd.google-apps.fusiontable",
   "application/vnd.google-apps.site",
-  "application/vnd.google-apps.map"
+  "application/vnd.google-apps.map",
+  "application/vnd.google-apps.vid",
 ];
 
-export const MIME_TYPE_TO_EXTENSION: { [mimeType: string]: string } = {
+export const MIME_TYPE_TO_EXTENSION: { [mime_type: string]: string } = {
+  // Google App Types
   "application/vnd.google-apps.document": "doc",
   "application/vnd.google-apps.spreadsheet": "sheet",
   "application/vnd.google-apps.presentation": "slides",
@@ -21,7 +23,27 @@ export const MIME_TYPE_TO_EXTENSION: { [mimeType: string]: string } = {
   "application/vnd.google-apps.fusiontable": "fusiontable",
   "application/vnd.google-apps.site": "site",
   "application/vnd.google-apps.map": "map",
-  "application/pdf": "pdf"
+  "application/vnd.google-apps.script+json": "json", // Apps Script JSON export
+  "application/vnd.google-apps.vid": "mp4",         // Google Vids export
+
+  // Common Export/Download Types from Google Workspace Docs
+  "application/pdf": "pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.oasis.opendocument.text": "odt",
+  "application/rtf": "rtf",
+  "text/plain": "txt",
+  "application/zip": "zip", // Used for HTML exports
+  "application/epub+zip": "epub",
+  "text/markdown": "md",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/x-vnd.oasis.opendocument.spreadsheet": "ods",
+  "text/csv": "csv",
+  "text/tab-separated-values": "tsv",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "application/vnd.oasis.opendocument.presentation": "odp",
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/svg+xml": "svg",
 };
 
 export const LINK_FILE_MIME_TYPES = [
