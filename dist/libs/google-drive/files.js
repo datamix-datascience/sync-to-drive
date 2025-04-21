@@ -1,67 +1,17 @@
 import * as core from "@actions/core";
 import * as fs from "fs";
-import * as fs_promises from "fs/promises";
 import * as path from "path";
 import { drive } from "./auth.js";
-// Note: We no longer need anything else from shortcuts.ts for link file creation
 // Import the specific function and map we need
-import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES, MIME_TYPE_TO_EXTENSION, get_link_file_suffix } from "./file_types.js";
+import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES, MIME_TYPE_TO_EXTENSION, construct_link_file_name } from "./file_types.js"; // <-- Import new function
 // Download File Content (Only for non-Google Docs - binary files)
-async function download_file_content(file_id, local_path) {
-    core.info(`Downloading Drive file content ID ${file_id} to local path ${local_path}`);
-    try {
-        const dir = path.dirname(local_path);
-        await fs_promises.mkdir(dir, { recursive: true });
-        const res = await drive.files.get({ fileId: file_id, alt: "media" }, { responseType: "stream" });
-        if (!res.data || typeof res.data.pipe !== 'function') {
-            throw new Error(`Drive API did not return a readable stream for file ID ${file_id}.`);
-        }
-        const writer = fs.createWriteStream(local_path);
-        return new Promise((resolve, reject) => {
-            res.data
-                .pipe(writer)
-                .on("finish", () => {
-                core.info(`Successfully downloaded content for file ${file_id} to ${local_path}`);
-                resolve();
-            })
-                .on("error", (err) => {
-                core.error(`Error writing downloaded file content ${file_id} to ${local_path}: ${err.message}`);
-                fs.unlink(local_path, unlinkErr => {
-                    if (unlinkErr && unlinkErr.code !== 'ENOENT') {
-                        core.warning(`Failed to clean up partial download ${local_path}: ${unlinkErr.message}`);
-                    }
-                    reject(err);
-                });
-            });
-        });
-    }
-    catch (error) {
-        const err = error;
-        if (err.code === 404) {
-            core.error(`Failed to download file content ${file_id}: File not found.`);
-        }
-        else if (err.code === 403) {
-            core.error(`Failed to download file content ${file_id}: Permission denied.`);
-        }
-        else if (err.message?.includes('downloading Google Docs')) {
-            core.error(`Failed to download file content ${file_id}: Cannot directly download Google Docs format.`);
-        }
-        else {
-            core.error(`Failed to download file content ${file_id}: ${err.message}`);
-        }
-        if (err.response?.data) {
-            core.error(`API Error Details: ${JSON.stringify(err.response.data)}`);
-        }
-        throw error;
-    }
-}
 // --- handle_download_item using the consolidated link function ---
 /**
  * Handles downloading/representing a Drive item locally.
- * Always creates a .gdrive.json file using create_gdrive_link_file.
+ * Creates a unique .gdrive.json file using construct_link_file_name.
  * Downloads content *only* if it's not a Google Workspace type.
  * @param drive_item The Drive item metadata.
- * @param local_path_base The intended local path for the *content* file.
+ * @param target_content_local_path The intended local path for the *content* file.
  * @returns An object containing the paths of the created files.
  */
 export async function handle_download_item(drive_item, target_content_local_path) {
@@ -74,12 +24,12 @@ export async function handle_download_item(drive_item, target_content_local_path
     const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType);
     let linkFilePath;
     let contentFilePath;
-    // Create a link file (e.g., .doc.gdrive.json) for Google Docs and PDFs
+    // Create a unique link file (e.g., report--XYZ123.doc.gdrive.json) for Google Docs and PDFs
     if (needs_link_file) {
-        const link_suffix = get_link_file_suffix(drive_item.mimeType);
         // Use the DRIVE ITEM's name for the link file base name
         const base_name = drive_item.name; // Assumes name doesn't contain path separators like '/'
-        const link_file_name = `${base_name}${link_suffix}`;
+        // Construct the unique link file name using the new function
+        const link_file_name = construct_link_file_name(base_name, drive_item.id, drive_item.mimeType);
         // Place it in the same directory as the target content file
         const content_dir = path.dirname(target_content_local_path);
         const link_file_path = path.join(content_dir, link_file_name);
@@ -130,16 +80,17 @@ export async function handle_download_item(drive_item, target_content_local_path
 }
 // --- upload_file ---
 /**
- * Uploads a local file to Google Drive, skipping link files (e.g., *.doc.gdrive.json).
+ * Uploads a local file to Google Drive, skipping link files (e.g., *--ID.type.gdrive.json).
  * Can create a new file or update an existing one.
  * @param local_file_path Absolute path to the local file.
  * @param target_folder_id Drive Folder ID where the file should be uploaded.
  * @param existing_drive_file Optional info for updating an existing file.
  * @returns Object with the Drive file ID and success status.
  */
-// Pre-compile regex for checking link files
+// Pre-compile regex for checking link files with the new pattern
 const known_extensions = Object.values(MIME_TYPE_TO_EXTENSION).join('|');
-const link_file_upload_regex = new RegExp(`\\.(${known_extensions})\\.gdrive\\.json$`);
+// Matches "--" followed by likely ID characters, then ".doc.", ".sheet.", etc., then ".gdrive.json"
+const link_file_upload_regex = new RegExp(`--[a-zA-Z0-9_-]+\\.(${known_extensions})\\.gdrive\\.json$`);
 export async function upload_file(local_file_path, target_folder_id, existing_drive_file) {
     const local_file_name = path.basename(local_file_path);
     // Skip uploading the link files themselves using the new pattern
