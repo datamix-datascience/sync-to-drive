@@ -187,6 +187,8 @@ export async function generate_visual_diffs_for_pr(params) {
     finally {
         core.endGroup();
     }
+    // If no relevant files changed *according to the PR diff*, we don't need to do anything.
+    // This handles cases where only non-link files were changed in a commit.
     if (changed_link_file_paths.length === 0) {
         core.info('No relevant changed link files found in this PR update. Nothing to generate or commit.');
         core.endGroup(); // Close the main group
@@ -206,42 +208,60 @@ export async function generate_visual_diffs_for_pr(params) {
         throw tempError;
     }
     let total_pngs_generated = 0;
-    const processed_files_info = []; // Track info for commit message
+    const processed_files_info = []; // Track info for commit message (PNG generation)
+    const cleaned_diff_dirs = []; // Track cleaned directories
     // --- Process Each Link File ---
-    core.startGroup('Processing Files and Generating PNGs');
+    core.startGroup('Processing Files and Generating/Cleaning PNGs');
     const files_to_process = [];
-    core.info('Collecting metadata and calculating output paths...');
+    core.info('Collecting metadata and calculating output paths based on PR diff...');
     for (const link_file_path of changed_link_file_paths) {
         core.info(`Preparing metadata for: ${link_file_path}`);
         try {
-            // Read file content *from the local filesystem*
-            core.debug(`Reading local file content for: ${link_file_path}`);
+            // Read file content *from the local filesystem* in the checked-out branch
+            // This file *might* exist, or it might have been deleted by the sync commit.
+            core.debug(`Checking local file content for: ${link_file_path}`);
             let file_content_str;
             try {
                 file_content_str = await fs.promises.readFile(link_file_path, 'utf-8');
             }
             catch (readFileError) {
                 if (readFileError.code === 'ENOENT') {
-                    core.warning(`   - Link file ${link_file_path} not found locally (deleted in PR?). Skipping.`);
-                    continue; // Skip this file
+                    // File listed in PR diff but not found locally - means it was deleted.
+                    // We still need its potential output path for cleanup.
+                    core.info(`   - Link file ${link_file_path} not found locally (deleted by sync). Will process for cleanup.`);
+                    // Calculate the expected output path even without content
+                    const png_output_relative_path = link_file_path.replace(/\.gdrive\.json$/i, '');
+                    if (png_output_relative_path === link_file_path) {
+                        core.error(`   - Failed to remove '.gdrive.json' suffix from ${link_file_path} (even though it was deleted). Skipping cleanup for this path.`);
+                        continue;
+                    }
+                    // Add to processing list, but ID/MIME will be dummy values (won't be used for fetch)
+                    files_to_process.push({
+                        link_file_path: link_file_path,
+                        png_output_relative_path: png_output_relative_path,
+                        file_id_from_content: "deleted", // Placeholder
+                        mime_type: "deleted", // Placeholder
+                    });
+                    continue; // Go to next file in PR diff
                 }
                 else {
+                    // Other read error, re-throw
                     throw readFileError;
                 }
             }
+            // If read succeeded, parse JSON
             const file_data = JSON.parse(file_content_str);
             if (!file_data || typeof file_data.id !== 'string' || typeof file_data.mimeType !== 'string') {
                 core.warning(`   - Could not find 'id' and 'mimeType' in JSON content of ${link_file_path}. Skipping.`);
                 continue;
             }
-            // Calculate the PNG output folder path directly from the link file path
-            // by stripping the final ".gdrive.json" suffix.
+            // Calculate the PNG output folder path
             const png_output_relative_path = link_file_path.replace(/\.gdrive\.json$/i, '');
             if (png_output_relative_path === link_file_path) {
-                // Sanity check - this should not happen if the regex found the file
                 core.error(`   - Failed to remove '.gdrive.json' suffix from ${link_file_path}. Skipping.`);
                 continue;
             }
+            // Add valid file info to the list
             files_to_process.push({
                 link_file_path: link_file_path,
                 png_output_relative_path: png_output_relative_path,
@@ -256,51 +276,101 @@ export async function generate_visual_diffs_for_pr(params) {
             continue;
         }
     } // End metadata collection loop
-    // Phase 2 (Removed): No complex folder name assignment needed anymore.
-    // Phase 3: Process files - Fetch PDF, Convert to PNGs
+    core.info(`Collected metadata for ${files_to_process.length} link files based on PR diff.`);
+    // Phase 2: Process files - Fetch PDF, Convert to PNGs OR Cleanup old diffs
+    // Now iterate through the collected files_to_process list
     for (const file_info of files_to_process) {
-        core.info(`Processing file: ${file_info.link_file_path} -> Output Folder: ${file_info.png_output_relative_path}`);
+        core.info(`Processing file entry: ${file_info.link_file_path} -> Output Folder: ${file_info.png_output_relative_path}`);
         const { link_file_path, png_output_relative_path, file_id_from_content, mime_type } = file_info;
-        // Use the relative path's basename for the temp PDF name for clarity
-        const temp_pdf_basename = path.basename(png_output_relative_path);
-        const temp_pdf_path = path.join(temp_dir, `${temp_pdf_basename}.pdf`);
         // Construct the absolute path for the final PNG output directory
+        // It's crucial this uses params.output_base_dir which is relative to the repo root
         const image_output_dir_absolute_path = path.join(params.output_base_dir, png_output_relative_path);
-        // Fetch PDF
-        core.info(`   - Fetching Drive file ID ${file_id_from_content} (from content) as PDF...`);
-        const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id_from_content, mime_type, temp_pdf_path);
-        if (!fetch_success) {
-            core.warning(`   - Failed to fetch PDF for ${link_file_path}. Skipping PNG generation.`);
-            continue; // Skip to next file
-        }
-        // Convert PDF to PNGs
-        core.info(`   - Converting PDF to PNGs in target directory: ${image_output_dir_absolute_path}`);
+        // *** START CLEANUP/PROCESS LOGIC ***
+        // Check if the source link file *still exists* on the filesystem in the checked-out branch
         try {
-            // Clean the specific output directory *before* generating new files.
-            core.debug(`   - Cleaning existing output directory: ${image_output_dir_absolute_path}`);
-            await fs.promises.rm(image_output_dir_absolute_path, { recursive: true, force: true });
-            await fs.promises.mkdir(image_output_dir_absolute_path, { recursive: true });
-            const generated_pngs = await convert_pdf_to_pngs(temp_pdf_path, image_output_dir_absolute_path, params.resolution_dpi);
-            if (generated_pngs.length > 0) {
-                total_pngs_generated += generated_pngs.length;
-                // Use the original link file path and the calculated relative PNG path for the commit message info
-                processed_files_info.push(`'${link_file_path}' (${generated_pngs.length} pages) -> ${png_output_relative_path}`);
-                core.info(`   - Successfully generated ${generated_pngs.length} PNGs.`);
+            // Use access to check existence - throws if not found or no permissions
+            await fs.promises.access(link_file_path, fs.constants.F_OK);
+            // If access succeeds, the link file exists, proceed to generate/update PNGs
+            core.info(`   - Link file '${link_file_path}' exists locally. Proceeding with PNG generation/update.`);
+            // --- PNG Generation Path ---
+            // Use the relative path's basename for the temp PDF name for clarity
+            const temp_pdf_basename = path.basename(png_output_relative_path);
+            const temp_pdf_path = path.join(temp_dir, `${temp_pdf_basename}.pdf`); // Use temp_dir! as it's checked earlier
+            // Fetch PDF
+            core.info(`   - Fetching Drive file ID ${file_id_from_content} as PDF...`);
+            const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id_from_content, mime_type, temp_pdf_path);
+            if (!fetch_success) {
+                core.warning(`   - Failed to fetch PDF for ${link_file_path}. Skipping PNG generation.`);
+                // Optionally: Decide if you want to REMOVE the existing diff dir if fetch fails
+                // For now, we'll leave potentially stale diffs if fetch fails
+                continue; // Skip to next file
+            }
+            // Convert PDF to PNGs
+            core.info(`   - Converting PDF to PNGs in target directory: ${image_output_dir_absolute_path}`);
+            try {
+                // Clean the specific output directory *before* generating new files.
+                // This is important for updates where the number of pages might change.
+                core.debug(`   - Cleaning existing output directory before regeneration: ${image_output_dir_absolute_path}`);
+                // Use force:true to avoid errors if dir doesn't exist yet
+                await fs.promises.rm(image_output_dir_absolute_path, { recursive: true, force: true });
+                await fs.promises.mkdir(image_output_dir_absolute_path, { recursive: true });
+                const generated_pngs = await convert_pdf_to_pngs(temp_pdf_path, image_output_dir_absolute_path, params.resolution_dpi);
+                if (generated_pngs.length > 0) {
+                    total_pngs_generated += generated_pngs.length;
+                    processed_files_info.push(`'${link_file_path}' (${generated_pngs.length} pages) -> ${png_output_relative_path}`);
+                    core.info(`   - Successfully generated ${generated_pngs.length} PNGs.`);
+                }
+                else {
+                    core.warning(`   - No PNGs generated from PDF for ${link_file_path}. PDF might be empty or conversion failed.`);
+                    // We still processed it, even if 0 pages resulted
+                    processed_files_info.push(`'${link_file_path}' (0 pages) -> ${png_output_relative_path}`);
+                }
+            }
+            catch (conversionError) {
+                core.error(`   - Failed during PDF->PNG conversion or directory handling for ${link_file_path}: ${conversionError.message}`);
+                core.debug(conversionError.stack);
+            }
+            finally {
+                // Clean up temporary PDF
+                core.debug(`   - Removing temporary PDF: ${temp_pdf_path}`);
+                await fs.promises.rm(temp_pdf_path, { force: true, recursive: false }).catch((rmErr) => core.warning(`   - Failed to remove temp PDF ${temp_pdf_path}: ${rmErr.message}`));
+            }
+            // --- End PNG Generation Path ---
+        }
+        catch (error) {
+            // If access check fails, indicating file not found (ENOENT), it means handle_drive_changes deleted it.
+            if (error.code === 'ENOENT') {
+                // --- Cleanup Path ---
+                core.info(`   - Link file '${link_file_path}' not found locally (likely deleted by prior sync step).`);
+                core.info(`   - Cleaning up corresponding visual diff directory: ${image_output_dir_absolute_path}`);
+                try {
+                    // Check if the diff directory actually exists before trying to remove
+                    // Use stat which returns info or throws ENOENT
+                    await fs.promises.stat(image_output_dir_absolute_path);
+                    // If stat succeeded, the directory exists, remove it
+                    await fs.promises.rm(image_output_dir_absolute_path, { recursive: true, force: true });
+                    core.info(`   - Successfully removed visual diff directory.`);
+                    // Use the absolute path here, convert to relative later for commit message
+                    cleaned_diff_dirs.push(image_output_dir_absolute_path); // Track cleaned dir
+                }
+                catch (rmOrStatError) {
+                    if (rmOrStatError.code === 'ENOENT') {
+                        core.info(`   - Visual diff directory '${image_output_dir_absolute_path}' does not exist. No cleanup needed.`);
+                    }
+                    else {
+                        core.warning(`   - Failed to check or remove visual diff directory '${image_output_dir_absolute_path}': ${rmOrStatError.message}`);
+                    }
+                }
+                // --- End Cleanup Path ---
             }
             else {
-                core.warning(`   - No PNGs generated from PDF for ${link_file_path}. PDF might be empty or conversion failed.`);
-                processed_files_info.push(`'${link_file_path}' (0 pages) -> ${png_output_relative_path}`);
+                // Log other errors during the access check but still skip processing this file
+                core.warning(`   - Error checking existence of link file '${link_file_path}': ${error.message}. Skipping.`);
             }
+            // Whether cleanup happened or another error occurred, skip to next file in the list
+            continue;
         }
-        catch (conversionError) {
-            core.error(`   - Failed during PDF->PNG conversion or directory handling for ${link_file_path}: ${conversionError.message}`);
-            core.debug(conversionError.stack);
-        }
-        finally {
-            // Clean up temporary PDF
-            core.debug(`   - Removing temporary PDF: ${temp_pdf_path}`);
-            await fs.promises.rm(temp_pdf_path, { force: true, recursive: false }).catch((rmErr) => core.warning(`   - Failed to remove temp PDF ${temp_pdf_path}: ${rmErr.message}`));
-        }
+        // *** END CLEANUP/PROCESS LOGIC ***
     } // End loop through files_to_process
     core.endGroup(); // End 'Processing Files' group
     // --- Cleanup Temporary Directory ---
@@ -308,13 +378,29 @@ export async function generate_visual_diffs_for_pr(params) {
         core.info(`Cleaning up base temporary directory: ${temp_dir}`);
         await fs.promises.rm(temp_dir, { recursive: true, force: true }).catch((rmErr) => core.warning(`Failed to remove base temp directory ${temp_dir}: ${rmErr.message}`));
     }
+    // --- Summarize results ---
     core.info(`Total PNGs generated or updated in this run: ${total_pngs_generated}`);
+    if (cleaned_diff_dirs.length > 0) {
+        core.info(`Removed ${cleaned_diff_dirs.length} visual diff directories due to missing link files.`);
+    }
     // --- Commit and Push Changes ---
-    // Commit if we prepared files for processing (even if 0 PNGs resulted from a specific file)
-    if (files_to_process.length > 0) {
-        const commit_message = `${SKIP_CI_TAG} Generate visual diff PNGs for PR #${params.pr_number}\n\nProcessed ${processed_files_info.length} file(s):\n- ${processed_files_info.join('\n- ')}`;
+    // Commit if we generated PNGs OR cleaned directories
+    if (processed_files_info.length > 0 || cleaned_diff_dirs.length > 0) {
+        const commit_lines = [];
+        if (processed_files_info.length > 0) {
+            commit_lines.push(`Processed ${processed_files_info.length} file(s) for PNG generation:`);
+            commit_lines.push(...processed_files_info.map(line => `- ${line}`));
+        }
+        if (cleaned_diff_dirs.length > 0) {
+            commit_lines.push(`Cleaned ${cleaned_diff_dirs.length} visual diff directorie(s):`);
+            // Use relative path for cleaner commit message
+            commit_lines.push(...cleaned_diff_dirs.map(absPath => `- ${path.relative(params.output_base_dir, absPath).replace(/\\/g, '/')}`));
+        }
+        const commit_message = `${SKIP_CI_TAG} Update visual diff PNGs for PR #${params.pr_number}\n\n${commit_lines.join('\n')}`;
         try {
-            await stage_commit_and_push_changes(params.output_base_dir, // Directory containing all changes
+            // stage_commit_and_push_changes should correctly stage the deletions made by fs.rm
+            // when 'git add params.output_base_dir' is called.
+            await stage_commit_and_push_changes(params.output_base_dir, // Directory containing all changes (additions and deletions)
             commit_message, params.git_user_email, params.git_user_name, params.head_branch // Branch to push to
             );
             // Debug post-commit Git state
@@ -332,12 +418,12 @@ export async function generate_visual_diffs_for_pr(params) {
             }
         }
         catch (commitError) {
-            core.error("Visual diff generation process completed, but committing/pushing changes failed.");
+            core.error("Visual diff generation/cleanup process completed, but committing/pushing changes failed.");
             throw commitError; // Fail the action
         }
     }
     else {
-        core.info('No link files were processed, or no relevant changes found. No commit needed.');
+        core.info('No link files were processed or cleaned up. No commit needed.');
     }
     core.info('Visual Diff Generation step finished successfully.');
     core.endGroup(); // End the main group
