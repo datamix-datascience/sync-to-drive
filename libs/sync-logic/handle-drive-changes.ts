@@ -8,7 +8,7 @@ import { DriveFileWithPath, list_drive_files_recursively } from "../google-drive
 import { handle_download_item } from "../google-drive/files.js";
 import { create_pull_request_with_retry } from "../github/pull-requests.js";
 import { octokit } from "../github/auth.js";
-import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES, get_link_file_suffix } from "../google-drive/file_types.js";
+import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES, get_link_file_suffix, MIME_TYPE_TO_EXTENSION } from "../google-drive/file_types.js";
 import { DriveItem } from "../google-drive/types.js";
 import { format_pr_body } from "./pretty.js";
 
@@ -91,6 +91,10 @@ export async function handle_drive_changes(
   // Keep the original list of DriveItems for PR body generation
   const drive_items_for_pr_body: DriveItem[] = [];
   const local_paths_identified_for_deletion = new Set<string>();
+  // --- NEW: Track potential duplicate files in Drive ---
+  const potential_duplicates_map = new Map<string, DriveItem[]>(); // Key: "dir:name:mimeType", Value: Array of conflicting DriveItems
+  const duplicate_items_for_pr_body = new Set<DriveItem>(); // Set of items confirmed to be duplicates
+
 
   try {
     // Step 1: Create temporary state branch
@@ -130,11 +134,31 @@ export async function handle_drive_changes(
     const drive_items_needing_processing = new Map<string, { driveItem: DriveItem, targetContentPath: string }>();
 
     // Populate expected_local_files based on the drive_files_with_paths array
+    // AND DETECT DUPLICATES
     for (const { path: drive_path, item: drive_item } of drive_files_with_paths) { // <-- Iterate the array
       if (!drive_item.id || !drive_item.name || !drive_item.mimeType) {
         core.warning(`Skipping Drive item with missing id, name, or mimeType. Path: '${drive_path}', ID: ${drive_item.id || 'N/A'}`);
         continue;
       }
+
+      // --- Duplicate Detection Logic ---
+      const drive_dir = path.dirname(drive_path).replace(/\\/g, '/'); // Normalize directory path
+      const base_name = drive_item.name; // Use Drive name for check
+      const mime_type = drive_item.mimeType;
+      const conflict_key = `${drive_dir}:${base_name}:${mime_type}`; // Key to identify potential duplicates
+
+      const existing_items = potential_duplicates_map.get(conflict_key);
+      if (existing_items) {
+        // Found a potential duplicate (another item with same name/type in same dir)
+        core.warning(`Potential duplicate file detected in Drive: Name='${base_name}', Type='${mime_type}', Directory='${drive_dir}'. Conflicting IDs: [${existing_items.map(i => i.id).join(', ')}, ${drive_item.id}]`);
+        existing_items.push(drive_item);
+        // Add all involved items to the set for the PR body
+        existing_items.forEach(item => duplicate_items_for_pr_body.add(item));
+      } else {
+        // First time seeing this name/type in this directory
+        potential_duplicates_map.set(conflict_key, [drive_item]);
+      }
+      // --- End Duplicate Detection Logic ---
 
       const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType);
       const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType);
@@ -146,8 +170,7 @@ export async function handle_drive_changes(
       let expected_link_path: string | null = null;
       if (needs_link_file) {
         const link_suffix = get_link_file_suffix(drive_item.mimeType); // e.g., .doc.gdrive.json
-        const base_name = drive_item.name; // Use Drive name for link file base
-        const drive_dir = path.dirname(drive_path); // Get directory from the *Drive path*
+        // Use Drive name for link file base (consistent with duplicate check)
         const link_filename = `${base_name}${link_suffix}`;
         // Calculate the link file path relative to the root
         expected_link_path = drive_dir === '.' ? link_filename : path.join(drive_dir, link_filename).replace(/\\/g, '/');
@@ -155,22 +178,27 @@ export async function handle_drive_changes(
 
       // Add expected *local* files to the map
       if (!is_google_doc) { // Content file expected for non-Google Docs
-        // Check if this content path is already mapped (e.g., by another file with the same name)
-        // This check is less critical now as we primarily compare against the full expected_local_files later
         if (expected_local_files.has(expected_content_path)) {
-          core.debug(`Duplicate content path mapping detected: ${expected_content_path}. Overwriting with Drive ID ${drive_item.id}.`)
+          const conflicting_item = expected_local_files.get(expected_content_path)?.driveItem;
+          core.debug(`Duplicate content path mapping detected: ${expected_content_path}. Existing ID: ${conflicting_item?.id}, New ID: ${drive_item.id}. Overwriting map entry.`);
+          // Note: Duplicate set already handled above based on name/type/dir
         }
         expected_local_files.set(expected_content_path, { type: 'content', driveItem: drive_item });
       }
       if (expected_link_path) { // Link file expected for Google Docs and PDFs
         if (expected_local_files.has(expected_link_path)) {
-          // This shouldn't happen if suffixes are unique per type and name+dir
-          core.warning(`Duplicate link path mapping detected: ${expected_link_path}. Overwriting with Drive ID ${drive_item.id}.`)
+          const conflicting_item = expected_local_files.get(expected_link_path)?.driveItem;
+          // This warning is now somewhat redundant due to the main duplicate check, but keep for debugging path generation issues.
+          core.warning(`Duplicate link file path calculation detected: ${expected_link_path}. Existing ID: ${conflicting_item?.id}, New ID: ${drive_item.id}. Consider renaming files in Google Drive. Overwriting map entry.`);
+          // Note: Duplicate set already handled above based on name/type/dir
         }
         expected_local_files.set(expected_link_path, { type: 'link', driveItem: drive_item });
       }
     }
     core.info(`Calculated ${expected_local_files.size} expected local files based on Drive state.`);
+    if (duplicate_items_for_pr_body.size > 0) {
+      core.warning(`Detected ${duplicate_items_for_pr_body.size} Drive items involved in potential name/type conflicts within the same folder. See PR body for details.`);
+    }
 
     // Compare expected state against initial local state to find changes
     // Iterate through the Drive items AGAIN to ensure each one is checked
@@ -235,9 +263,6 @@ export async function handle_drive_changes(
         const drive_dir = path.dirname(drive_path);
         const expected_link_path = drive_dir === '.' ? `${base_name}${link_suffix}` : path.join(drive_dir, `${base_name}${link_suffix}`).replace(/\\/g, '/');
         const expected_link_info = expected_local_files.get(expected_link_path);
-        if (expected_local_files.has(expected_link_path)) {
-          core.warning(`Duplicate link file path detected: ${expected_link_path} for Drive ID ${drive_item.id}. Consider renaming files in Google Drive to avoid conflicts.`);
-        }
 
         // Ensure the mapping points back to the *current* drive_item ID
         if (expected_link_info && expected_link_info.driveItem.id === drive_item.id) {
@@ -382,13 +407,17 @@ export async function handle_drive_changes(
     await execute_git("add", ["."]);
     await execute_git("add", ["-u"]);
     const status_result = await execute_git('status', ['--porcelain']);
-    if (!status_result.stdout.trim()) {
-      core.info("Git status is clean. No commit needed.");
+    if (!status_result.stdout.trim() && duplicate_items_for_pr_body.size === 0) { // Also check for duplicates
+      core.info("Git status is clean and no Drive duplicates detected. No commit or PR needed.");
       core.endGroup();
       return result;
+    } else if (!status_result.stdout.trim() && duplicate_items_for_pr_body.size > 0) {
+      core.info("Git status is clean, but potential Drive duplicates were detected. Creating PR to report duplicates.");
+    } else {
+      core.info("Git status shows changes. Proceeding with commit.");
+      core.debug("Git status output:\n" + status_result.stdout);
     }
-    core.info("Git status shows changes. Proceeding with commit.");
-    core.debug("Git status output:\n" + status_result.stdout);
+
 
     // Commit message details
     const commit_detail_lines = [];
@@ -401,55 +430,82 @@ export async function handle_drive_changes(
     const removed_display_paths = Array.from(local_paths_identified_for_deletion).sort((a, b) => a.localeCompare(b));
     if (removed_display_paths.length > 0) commit_detail_lines.push(`- Remove (local paths): ${removed_display_paths.map(p => `'${p}'`).join(", ")}`);
 
+    // --- NEW: Add info about duplicates to commit message if any ---
+    if (duplicate_items_for_pr_body.size > 0) {
+      commit_detail_lines.push(`- Detected ${duplicate_items_for_pr_body.size} potentially duplicate Drive items (see PR body)`);
+    }
+
     const commit_message = [
       `Sync changes from Google Drive (${folder_id})`,
-      ...commit_detail_lines,
+      ...(commit_detail_lines.length > 0 ? commit_detail_lines : ["- No file content changes detected."]), // Ensure commit body isn't empty
       `\nSource Drive Folder ID: ${folder_id}`,
       `Workflow Run ID: ${run_id}`
     ].join("\n");
 
     try {
-      core.info("Committing staged changes on temporary branch...");
-      await execute_git("commit", ["-m", commit_message]);
-      const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
-      core.info(`Created sync commit ${sync_commit_hash} on temporary branch '${original_state_branch}'.`);
+      // Only commit if there are actual file changes
+      if (status_result.stdout.trim()) {
+        core.info("Committing staged changes on temporary branch...");
+        await execute_git("commit", ["-m", commit_message]);
+      } else {
+        core.info("No file changes to commit, but proceeding to PR creation due to detected duplicates.");
+        // We still need a commit hash to base the branch off, use the current one
+        const current_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
+        if (!current_commit_hash) throw new Error("Could not get current commit hash for duplicate reporting PR branch.");
+        // No actual commit needed here, we'll branch from the existing state
+      }
+      const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim(); // Get HEAD SHA (either new commit or original)
+      core.info(`Using commit ${sync_commit_hash} on temporary branch '${original_state_branch}' as base for PR branch.`);
+
 
       const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
+      // Append -duplicates if only duplicates are reported? Maybe not, keep branch name consistent.
       const head_branch = `sync-from-drive-${sanitized_folder_id}`;
       result.head_branch = head_branch;
 
       core.info(`Preparing PR branch: ${head_branch}`);
       const local_branch_exists_check = await execute_git('show-ref', ['--verify', `refs/heads/${head_branch}`], { ignoreReturnCode: true, silent: true });
       const remote_branch_exists_check = await execute_git('ls-remote', ['--exit-code', '--heads', 'origin', head_branch], { ignoreReturnCode: true, silent: true });
+
+      let branch_creation_needed = true;
+
       if (local_branch_exists_check.exitCode === 0) {
         core.info(`Branch ${head_branch} exists locally. Checking it out and resetting...`);
         await execute_git("checkout", ["--force", head_branch]);
-        await execute_git("reset", ["--hard", sync_commit_hash]);
+        await execute_git("reset", ["--hard", sync_commit_hash]); // Reset to the sync commit (might be the original if no changes)
+        branch_creation_needed = false;
       } else if (remote_branch_exists_check.exitCode === 0) {
         core.info(`Branch ${head_branch} exists remotely. Fetching, checking out, and resetting...`);
         try {
           await execute_git("fetch", ["origin", `${head_branch}:${head_branch}`]);
           await execute_git("checkout", ["--force", head_branch]);
-          await execute_git("reset", ["--hard", sync_commit_hash]);
+          await execute_git("reset", ["--hard", sync_commit_hash]); // Reset to the sync commit
+          branch_creation_needed = false;
         } catch (fetchCheckoutError) {
-          core.warning(`Failed to fetch/checkout/reset remote branch ${head_branch}. Creating new local branch. Error: ${(fetchCheckoutError as Error).message}`);
-          await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
+          core.warning(`Failed to fetch/checkout/reset remote branch ${head_branch}. Will create new local branch. Error: ${(fetchCheckoutError as Error).message}`);
+          // Fall through to create branch locally
         }
-      } else {
-        core.info(`Branch ${head_branch} does not exist. Creating it from sync commit...`);
-        await execute_git("checkout", ["-b", head_branch, sync_commit_hash]);
       }
 
+      if (branch_creation_needed) {
+        core.info(`Branch ${head_branch} does not exist or couldn't be reset. Creating it from commit ${sync_commit_hash}...`);
+        await execute_git("checkout", ["-b", head_branch, sync_commit_hash]); // Create branch from the correct commit
+      }
+
+
       core.info(`Pushing branch ${head_branch} to origin...`);
+      // Push force needed because we might reset the branch
       await execute_git("push", ["--force", "origin", head_branch]);
 
-      const pr_title = `Sync changes from Google Drive (${folder_id})`;
-      // Use the list collected specifically for the PR body
+      const pr_title = `Sync changes from Google Drive (${folder_id})${duplicate_items_for_pr_body.size > 0 ? ' [Duplicates Detected]' : ''}`;
+      // Convert duplicate set to array for format_pr_body
+      const duplicates_array = Array.from(duplicate_items_for_pr_body);
       const pr_body = format_pr_body(
         folder_id,
         run_id,
-        drive_items_for_pr_body, // <-- Pass the correct list here
-        local_paths_identified_for_deletion
+        drive_items_for_pr_body, // Added/Updated items
+        local_paths_identified_for_deletion, // Removed paths
+        duplicates_array // <-- NEW: Pass the list of duplicate items
       );
 
       const pr_params = { owner: repo_info.owner, repo: repo_info.repo, title: pr_title, head: head_branch, base: initial_branch, body: pr_body };
