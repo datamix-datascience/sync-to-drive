@@ -44,8 +44,7 @@ export function format_pr_body(
   folder_id: string,
   run_id: string,
   added_updated_drive_items: DriveItem[],
-  removed_local_paths: Set<string>,
-  duplicate_drive_items: DriveItem[]
+  removed_local_paths: Set<string>
 ): string {
   const pr_body_lines: string[] = [
     `This PR syncs changes detected in Google Drive folder [${folder_id}](https://drive.google.com/drive/folders/${folder_id}).`,
@@ -77,25 +76,6 @@ export function format_pr_body(
       pr_body_lines.push(`*   \`${p}\``); // Use backticks for code formatting
     });
   }
-
-  // --- Section for Duplicates ---
-  // Sort duplicate items alphabetically by name
-  duplicate_drive_items.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
-
-  if (duplicate_drive_items.length > 0) {
-    pr_body_lines.push(''); // Add blank line
-    pr_body_lines.push('⚠️ **Potential Duplicate Files Detected in Drive:**');
-    pr_body_lines.push('> The following files seem to have the same name and type within the same folder in Google Drive. Please review and resolve any unintended duplicates directly in Drive.');
-    duplicate_drive_items.forEach((item) => {
-      const link = item.webViewLink; // Keep camelCase from DriveItem
-      const extension_label = get_safe_mime_type_label(item.mimeType); // Call snake_case helper
-      const name_display = `\`[${extension_label}] ${item.name || item.id}\``;
-      // Include ID in text for clarity even if link exists
-      const line = link ? `*   [${name_display}](${link}) (ID: \`${item.id}\`)` : `*   ${name_display} (ID: \`${item.id}\`)`;
-      pr_body_lines.push(line);
-    });
-  }
-  // --- End Duplicates Section ---
 
   pr_body_lines.push(''); // Add blank line
   pr_body_lines.push(`*Source Drive Folder ID: \`${folder_id}\`*`);

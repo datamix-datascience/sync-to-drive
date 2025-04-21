@@ -13,7 +13,6 @@ const SKIP_CI_TAG = '[skip visual-diff]'; // Specific tag for this step
 
 /**
  * Checks the latest commit message on the specified remote branch for a skip tag.
- * NOTE: Assumes 'origin' is the relevant remote.
  */
 async function should_skip_generation(branch_name: string): Promise<boolean> {
   core.startGroup(`Checking latest commit on remote branch 'origin/${branch_name}' for skip tag`);
@@ -55,17 +54,8 @@ async function should_skip_generation(branch_name: string): Promise<boolean> {
     return false; // Default to not skipping if check fails
   }
 }
-
 /**
  * Stages, commits, and pushes changes within a specified directory.
- * ASSUMES the correct branch is already checked out and the working directory
- * contains the desired final state (including deletions).
- *
- * @param changes_dir The directory containing the changes to stage and commit relative to repo root.
- * @param commit_message The commit message.
- * @param git_user_email The email address for the Git commit author.
- * @param git_user_name The name for the Git commit author.
- * @param target_branch The name of the branch to push to.
  */
 async function stage_commit_and_push_changes(
   changes_dir: string,
@@ -143,12 +133,12 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   core.info(`PNG Resolution: ${params.resolution_dpi} DPI`);
 
   // --- Skip Check ---
-  // Check commit message on the *remote* branch before checking out locally
   if (await should_skip_generation(params.head_branch)) {
     core.info("Skipping visual diff generation based on remote commit message.");
     core.endGroup();
     return;
   }
+
 
   // --- Setup Git Environment ---
   core.startGroup(`Setting up Git environment for branch ${params.head_branch}`);
@@ -184,7 +174,6 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   }
 
   // --- Ensure output directory exists ---
-  // This should happen *after* checkout, as checkout might remove it if it wasn't tracked
   try {
     core.info(`Ensuring output directory exists: ${params.output_base_dir}`);
     await fs.promises.mkdir(params.output_base_dir, { recursive: true });
@@ -193,14 +182,18 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     throw dirError;
   }
 
+
   // --- Find Changed Link Files in PR ---
-  // This uses the GitHub API, independent of local checkout state for *finding* files,
-  // but we need the local checkout to get file content later.
   core.startGroup('Finding Changed Link Files in PR');
-  const changed_link_files: { path: string; base_name: string; file_type: string }[] = [];
+  const changed_link_files: { path: string; base_name: string; file_id: string; file_type: string }[] = []; // Added file_id
   const known_extensions_vd = Object.values(MIME_TYPE_TO_EXTENSION).join('|');
-  const link_file_regex_vd = new RegExp(`\\.(${known_extensions_vd})\\.gdrive\\.json$`, 'i');
+  // Updated regex to match the new pattern: --[ID].[type].gdrive.json
+  // Capture Group 1: Base name (non-greedy)
+  // Capture Group 2: File ID
+  // Capture Group 3: Type extension (e.g., doc, sheet, pdf)
+  const link_file_regex_vd = new RegExp(`^(.*?)--([a-zA-Z0-9_-]+)\\.(${known_extensions_vd})\\.gdrive\\.json$`, 'i');
   core.debug(`Using regex to find link files: ${link_file_regex_vd}`);
+
 
   try {
     const files_iterator = params.octokit.paginate.iterator(params.octokit.rest.pulls.listFiles, {
@@ -209,16 +202,20 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
 
     for await (const { data: files } of files_iterator) {
       for (const file of files) {
-        const match = file.filename.match(link_file_regex_vd);
+        // Extract the filename itself from the full path
+        const filename_only = path.basename(file.filename);
+        const match = filename_only.match(link_file_regex_vd);
+
         if (
           match &&
           (file.status === 'added' || file.status === 'modified' || file.status === 'renamed')
         ) {
-          const matched_suffix = match[0];
-          const file_type = match[1];
-          const base_name = path.basename(file.filename, matched_suffix);
-          core.info(` -> Found candidate: ${file.filename} (Status: ${file.status}) -> Base Name: ${base_name} (Type: ${file_type})`);
-          changed_link_files.push({ path: file.filename, base_name, file_type });
+          const base_name = match[1]; // Captured base name part
+          const file_id = match[2]; // Captured file ID part
+          const file_type = match[3]; // Captured type extension part (doc, sheet, etc.)
+          core.info(` -> Found candidate: ${file.filename} (Status: ${file.status}) -> Base Name: ${base_name}, ID: ${file_id}, Type: ${file_type}`);
+          // Store the full path from the PR file list
+          changed_link_files.push({ path: file.filename, base_name, file_id, file_type });
         } else {
           core.debug(` -> Skipping file: ${file.filename} (Status: ${file.status}, Pattern mismatch: ${!match})`);
         }
@@ -259,39 +256,30 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
 
   // Phase 1: Collect metadata for all link files
   interface FileMetadata {
-    path: string;
-    file_id: string;
+    path: string; // Full path from PR list
+    file_id_from_name: string; // ID extracted from filename
+    file_id_from_content: string; // ID read from JSON content
     mime_type: string;
-    original_name: string;
-    extension: string;
-    file_type: string;
-    base_name: string;
+    original_name_from_content: string; // Name read from JSON content
+    extension: string; // Type extension (doc, pdf)
+    base_name_from_name: string; // Base name extracted from filename
     modifiedTime?: string;
   }
   const file_metadata: FileMetadata[] = [];
   core.info('Collecting metadata for changed link files...');
-  for (const link_file of changed_link_files) {
+  for (const link_file of changed_link_files) { // link_file now contains path, base_name, file_id, file_type
     core.info(`Collecting metadata for: ${link_file.path}`);
     try {
-      // Read file content *from the local filesystem* which is now checked out to head_sha
+      // Read file content *from the local filesystem*
       core.debug(`Reading local file content for: ${link_file.path}`);
-      // Note: We assume the file exists locally because we checked out the branch.
-      // If the PR involves file deletion, listFiles API finds it, but it won't exist locally.
-      // We should handle this case. Let's check existence first.
-
       let file_content_str: string;
       try {
         file_content_str = await fs.promises.readFile(link_file.path, 'utf-8');
       } catch (readFileError: any) {
         if (readFileError.code === 'ENOENT') {
-          // This handles the case where the PR deleted the link file.
-          // We shouldn't process it for PNGs.
-          core.warning(`   - Link file ${link_file.path} not found locally. It might have been deleted in this PR. Skipping.`);
-          continue; // Skip to the next link file
-        } else {
-          // Rethrow other file reading errors
-          throw readFileError;
-        }
+          core.warning(`   - Link file ${link_file.path} not found locally (deleted in PR?). Skipping.`);
+          continue;
+        } else { throw readFileError; }
       }
 
       const file_data = JSON.parse(file_content_str);
@@ -301,40 +289,44 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
         continue;
       }
 
-      const file_id = file_data.id;
+      // Basic consistency check between filename ID and content ID
+      if (file_data.id !== link_file.file_id) {
+        core.warning(`   - File ID mismatch for ${link_file.path}: Filename ID='${link_file.file_id}', Content ID='${file_data.id}'. Using content ID.`);
+      }
+
+      const file_id_from_content = file_data.id;
       const mime_type = file_data.mimeType;
-      const original_name = (typeof file_data.name === 'string' && file_data.name.trim() ? file_data.name.trim() : link_file.base_name).replace(
-        new RegExp(`\\.(?:${Object.values(MIME_TYPE_TO_EXTENSION).join('|')})$`, 'i'),
-        ''
-      );
-      const extension = MIME_TYPE_TO_EXTENSION[mime_type] || link_file.file_type;
+      // Prefer name from content, fall back to base name from filename if content name missing
+      const original_name_from_content = (typeof file_data.name === 'string' && file_data.name.trim()) ? file_data.name.trim() : link_file.base_name;
+      const extension = MIME_TYPE_TO_EXTENSION[mime_type] || link_file.file_type; // Use file_type extracted from regex as fallback
       const modifiedTime = typeof file_data.modifiedTime === 'string' ? file_data.modifiedTime : undefined;
 
       file_metadata.push({
         path: link_file.path,
-        file_id,
+        file_id_from_name: link_file.file_id,
+        file_id_from_content: file_id_from_content,
         mime_type,
-        original_name,
+        original_name_from_content: original_name_from_content,
         extension,
-        file_type: link_file.file_type,
-        base_name: link_file.base_name,
+        base_name_from_name: link_file.base_name, // Keep for potential folder naming
         modifiedTime
       });
-      core.info(`   - Collected: ID=${file_id}, MIME=${mime_type}, Name=${original_name}, Extension=${extension}, Modified=${modifiedTime || 'N/A'}`);
+      core.info(`   - Collected: ContentID=${file_id_from_content}, MIME=${mime_type}, ContentName=${original_name_from_content}, Ext=${extension}, Modified=${modifiedTime || 'N/A'}`);
 
     } catch (error: any) {
-      // Handle JSON parsing errors or other unexpected issues
       core.warning(`   - Failed to read or parse local content of ${link_file.path}: ${error.message}. Skipping.`);
       core.debug(error.stack);
-      continue; // Skip this file on error
+      continue;
     }
   } // End metadata collection loop
 
-  // Phase 2: Detect duplicates and assign unique folder names
+  // Phase 2: Assign unique folder names (still useful for organizing PNGs)
+  // Use content name and extension as the primary key for grouping, but use ID for folder if names clash.
   interface ProcessedMetadata { meta: FileMetadata; folder_name: string; }
   const name_type_map: { [key: string]: FileMetadata[] } = {};
   file_metadata.forEach((meta) => {
-    const key = `${meta.original_name}:${meta.extension}`;
+    // Group by the name stored *inside* the link file and its type extension
+    const key = `${meta.original_name_from_content}:${meta.extension}`;
     if (!name_type_map[key]) name_type_map[key] = [];
     name_type_map[key].push(meta);
   });
@@ -344,43 +336,53 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   for (const key in name_type_map) {
     const files_with_same_name_type = name_type_map[key];
     if (files_with_same_name_type.length > 1) {
-      core.info(`Detected ${files_with_same_name_type.length} files resolving to name/type: ${key}. Using file ID for disambiguation.`);
+      // Name/type clash based on content, need to disambiguate folder name
+      core.info(`Detected ${files_with_same_name_type.length} files resolving to content name/type: ${key}. Using file ID for folder name disambiguation.`);
+      // Sort by modified time (most recent first might be preferred, but let's stick to consistency)
       files_with_same_name_type.sort((a, b) => {
-        if (!a.modifiedTime && !b.modifiedTime) return 0;
-        if (!a.modifiedTime) return 1;
-        if (!b.modifiedTime) return -1;
-        return b.modifiedTime.localeCompare(a.modifiedTime);
+        // Sort primarily by modified time (desc), then by path as tie-breaker
+        const timeCompare = (b.modifiedTime || '').localeCompare(a.modifiedTime || '');
+        if (timeCompare !== 0) return timeCompare;
+        return a.path.localeCompare(b.path);
       });
+
       files_with_same_name_type.forEach((meta, index) => {
+        // Use content name + extension for the first, add content ID for subsequent ones
         const folder_name = index === 0
-          ? `${meta.original_name}.${meta.extension}`
-          : `${meta.original_name}.${meta.file_id.slice(0, 8)}.${meta.extension}`;
+          ? `${meta.original_name_from_content}.${meta.extension}`
+          : `${meta.original_name_from_content}--${meta.file_id_from_content}.${meta.extension}`; // Use content ID
         processed_metadata.push({ meta, folder_name });
-        core.debug(`   - Assigned folder_name=${folder_name} for ${meta.path} (Modified=${meta.modifiedTime || 'N/A'}, Index=${index})`);
+        core.debug(`   - Assigned folder_name=${folder_name} for ${meta.path} (ContentID=${meta.file_id_from_content}, Index=${index})`);
       });
     } else {
+      // No name/type clash for this group based on content
       const meta = files_with_same_name_type[0];
-      const folder_name = `${meta.original_name}.${meta.extension}`;
+      const folder_name = `${meta.original_name_from_content}.${meta.extension}`; // Use content name + extension
       processed_metadata.push({ meta, folder_name });
-      core.debug(`   - Assigned folder_name=${folder_name} for ${meta.path} (No duplicates for this name/type)`);
+      core.debug(`   - Assigned folder_name=${folder_name} for ${meta.path} (No content name/type duplicates)`);
     }
-  } // End duplicate handling loop
+  } // End folder name assignment loop
 
   // --- Phase 3: Process files - Fetch PDF, Convert to PNGs ---
-  // This phase modifies the local filesystem based on the checked-out state.
   for (const { meta, folder_name } of processed_metadata) {
     core.info(`Processing file: ${meta.path} -> Output Folder: ${folder_name}`);
-    const { file_id, mime_type } = meta;
+    // Use the file ID read from the JSON content for fetching
+    const file_id_to_fetch = meta.file_id_from_content;
+    const { mime_type } = meta;
 
+    // Sanitize the calculated folder name for filesystem use
     const sanitized_folder_name = folder_name.replace(/[^a-zA-Z0-9_.-]/g, '_').replace(/\s+/g, '_');
     const temp_pdf_path = path.join(temp_dir, `${sanitized_folder_name}.pdf`);
+
+    // IMPORTANT: Place PNGs relative to the *link file's* directory
     const relative_dir_of_link_file = path.dirname(meta.path);
     const image_output_dir_relative_path = path.join(relative_dir_of_link_file, sanitized_folder_name);
     const image_output_dir_absolute_path = path.join(params.output_base_dir, image_output_dir_relative_path);
 
+
     // Fetch PDF
-    core.info(`   - Fetching Drive file ID ${file_id} as PDF...`);
-    const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id, mime_type, temp_pdf_path);
+    core.info(`   - Fetching Drive file ID ${file_id_to_fetch} (from content) as PDF...`);
+    const fetch_success = await fetch_drive_file_as_pdf(params.drive, file_id_to_fetch, mime_type, temp_pdf_path);
 
     if (!fetch_success) {
       core.warning(`   - Failed to fetch PDF for ${meta.path}. Skipping PNG generation.`);
@@ -390,10 +392,7 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     // Convert PDF to PNGs
     core.info(`   - Converting PDF to PNGs in target directory: ${image_output_dir_absolute_path}`);
     try {
-      // CRITICAL: Clean the specific output directory *before* generating new files.
-      // This occurs *after* checkout, modifying the working directory.
-      // It ensures that if pages were deleted in Drive, the corresponding old PNGs
-      // are removed from the local filesystem before 'git add'.
+      // Clean the specific output directory *before* generating new files.
       core.debug(`   - Cleaning existing output directory: ${image_output_dir_absolute_path}`);
       await fs.promises.rm(image_output_dir_absolute_path, { recursive: true, force: true });
       await fs.promises.mkdir(image_output_dir_absolute_path, { recursive: true });
@@ -402,11 +401,11 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
 
       if (generated_pngs.length > 0) {
         total_pngs_generated += generated_pngs.length;
+        // Use the original link file path for the commit message info
         processed_files_info.push(`'${meta.path}' (${generated_pngs.length} pages) -> ${image_output_dir_relative_path}`);
         core.info(`   - Successfully generated ${generated_pngs.length} PNGs.`);
       } else {
         core.warning(`   - No PNGs generated from PDF for ${meta.path}. PDF might be empty or conversion failed.`);
-        // Add info even if 0 pages, indicates processing attempt
         processed_files_info.push(`'${meta.path}' (0 pages) -> ${image_output_dir_relative_path}`);
       }
     } catch (conversionError: any) {
@@ -433,12 +432,9 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   core.info(`Total PNGs generated or updated in this run: ${total_pngs_generated}`);
 
   // --- Commit and Push Changes ---
-  // Only commit if we actually attempted to process files (even if 0 PNGs resulted)
-  // and therefore potentially modified the filesystem (e.g., cleaned directories).
-  if (processed_metadata.length > 0) { // Use processed_metadata as trigger, not just png count
+  if (processed_metadata.length > 0) {
     const commit_message = `${SKIP_CI_TAG} Generate visual diff PNGs for PR #${params.pr_number}\n\nProcessed ${processed_files_info.length} file(s):\n- ${processed_files_info.join('\n- ')}`;
     try {
-      // Call the commit function, assuming we are on the correct branch already
       await stage_commit_and_push_changes(
         params.output_base_dir, // Directory containing all changes
         commit_message,
@@ -461,13 +457,13 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
       }
 
     } catch (commitError) {
-      // Error is already logged within stage_commit_and_push_changes
       core.error("Visual diff generation process completed, but committing/pushing changes failed.");
       throw commitError; // Fail the action
     }
   } else {
     core.info('No link files were processed, or no relevant changes found. No commit needed.');
   }
+
 
   core.info('Visual Diff Generation step finished successfully.');
   core.endGroup(); // End the main group
