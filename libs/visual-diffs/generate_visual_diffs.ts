@@ -202,7 +202,8 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
         // Use the regex to test if the filename matches the expected link file pattern
         if (
           link_file_regex_vd.test(path.basename(file.filename)) &&
-          (file.status === 'added' || file.status === 'modified' || file.status === 'renamed')
+
+          (file.status === 'added' || file.status === 'modified' || file.status === 'renamed' || file.status === 'removed')
         ) {
           core.info(` -> Found candidate link file: ${file.filename} (Status: ${file.status})`);
           changed_link_file_paths.push(file.filename); // Store the full path
@@ -211,7 +212,7 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
         }
       }
     }
-    core.info(`Found ${changed_link_file_paths.length} added/modified/renamed link file(s) matching pattern to process.`);
+    core.info(`Found ${changed_link_file_paths.length} added/modified/renamed/removed link file(s) matching pattern to process.`); // Updated log message
   } catch (error: any) {
     core.error(`Failed to list PR files via GitHub API: ${error.message}`);
     core.endGroup();
@@ -221,7 +222,6 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   }
 
   // If no relevant files changed *according to the PR diff*, we don't need to do anything.
-  // This handles cases where only non-link files were changed in a commit.
   if (changed_link_file_paths.length === 0) {
     core.info('No relevant changed link files found in this PR update. Nothing to generate or commit.');
     core.endGroup(); // Close the main group
@@ -452,7 +452,8 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
     if (cleaned_diff_dirs.length > 0) {
       commit_lines.push(`Cleaned ${cleaned_diff_dirs.length} visual diff directorie(s):`);
       // Use relative path for cleaner commit message
-      commit_lines.push(...cleaned_diff_dirs.map(absPath => `- ${path.relative(params.output_base_dir, absPath).replace(/\\/g, '/')}`));
+      // Make relative to the CWD (repo root), not output_base_dir
+      commit_lines.push(...cleaned_diff_dirs.map(absPath => `- ${path.relative('.', absPath).replace(/\\/g, '/')}`));
     }
 
     const commit_message = `${SKIP_CI_TAG} Update visual diff PNGs for PR #${params.pr_number}\n\n${commit_lines.join('\n')}`;
