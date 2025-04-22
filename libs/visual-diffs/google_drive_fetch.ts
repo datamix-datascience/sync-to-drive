@@ -4,7 +4,7 @@ import * as path from 'path';
 import { drive_v3 } from 'googleapis';
 import {
   is_readable_stream,
-  GOOGLE_WORKSPACE_EXPORTABLE_TYPES,
+  GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES,
   NATIVE_PDF_TYPE
 } from './types.js';
 
@@ -28,7 +28,7 @@ export async function fetch_drive_file_as_pdf(
   let response_stream: NodeJS.ReadableStream | null = null;
 
   try {
-    if (GOOGLE_WORKSPACE_EXPORTABLE_TYPES.includes(mime_type)) {
+    if (GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES.includes(mime_type)) {
       core.info(`   - Exporting Google Workspace file as PDF...`);
       const response = await drive.files.export(
         { fileId: file_id, mimeType: 'application/pdf' },
