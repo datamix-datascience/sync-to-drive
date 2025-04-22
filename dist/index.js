@@ -13,7 +13,7 @@ import { upload_file } from "./libs/google-drive/files.js";
 import { delete_untracked } from "./libs/google-drive/delete.js";
 import { request_ownership_transfer, accept_ownership_transfers } from "./libs/google-drive/ownership.js";
 import { handle_drive_changes } from "./libs/sync-logic/handle-drive-changes.js";
-import { GOOGLE_DOC_MIME_TYPES } from "./libs/google-drive/file_types.js";
+import { GOOGLE_DOC_MIME_TYPES, MIME_TYPE_TO_EXTENSION } from "./libs/google-drive/file_types.js"; // Use MIME_TYPE_TO_EXTENSION for regex
 import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visual_diffs.js';
 // --- Get Inputs ---
 const trigger_event_name = core.getInput('trigger_event_name', { required: true });
@@ -24,32 +24,44 @@ const visual_diff_link_suffix = core.getInput('visual_diff_link_suffix', { requi
 const visual_diff_dpi = parseInt(core.getInput('visual_diff_dpi', { required: false }) || '72', 10); // Default DPI
 const git_user_name = core.getInput('git_user_name', { required: false }) || 'github-actions[bot]';
 const git_user_email = core.getInput('git_user_email', { required: false }) || 'github-actions[bot]@users.noreply.github.com';
+// STEP 0: Define Regex for matching link files based on the construct_link_file_name format
+// Matches: "basename--ID.type.gdrive.json"
+// e.g., "Report--XYZ123.doc.gdrive.json"
+const known_extensions_regex_part = Object.values(MIME_TYPE_TO_EXTENSION).join('|');
+// Be careful with paths containing '--' in the base name itself. The regex needs to be somewhat specific.
+// It looks for '--', then likely ID chars (alphanumeric, -, _), then a dot, known extension, then the final suffix.
+const LINK_FILE_REGEX = new RegExp(`--[a-zA-Z0-9_-]+\\.(${known_extensions_regex_part})${visual_diff_link_suffix.replace('.', '\\.')}$`);
 // STEP 0: Define function to parse link files and create mapping
 /**
- * Parses local files ending with the link_suffix, extracts Drive metadata,
- * and returns a map linking source file paths to their last known Drive state.
+ * Parses local files matching the link file pattern, extracts Drive metadata,
+ * and returns a map linking Drive file paths to their last known Drive state.
  * @param local_files List of local files found in the repository.
- * @param link_suffix The suffix used to identify link files (e.g., '.gdrive.json').
- * @returns A map where keys are source file relative paths (e.g., 'docs/My Doc.docx')
+ * @param link_file_regex Regex to identify link files (e.g., based on *--ID.type.gdrive.json).
+ * @returns A map where keys are Drive file relative paths (e.g., 'docs/My Doc.docx')
  *          and values are objects containing the Drive file ID and modified time.
  */
-async function create_link_file_data_map(local_files, link_suffix) {
+async function create_link_file_data_map(local_files, link_file_regex) {
     const link_data_map = new Map();
-    core.info(`Parsing local link files with suffix "${link_suffix}"...`);
+    core.info(`Parsing local link files using regex: ${link_file_regex.source}`);
     for (const file of local_files) {
-        if (file.relative_path.endsWith(link_suffix)) {
-            // Determine the path of the source file this link file corresponds to
-            const source_file_path = file.relative_path.substring(0, file.relative_path.length - link_suffix.length).replace(/\\/g, '/');
+        // Use regex to check if the filename matches the expected link file pattern
+        if (link_file_regex.test(file.relative_path)) {
+            core.debug(` -> Potential link file found: ${file.relative_path}`);
             try {
                 const content = await fs.readFile(file.path, 'utf-8');
                 const data = JSON.parse(content);
                 // Ensure essential data is present before adding to the map
-                if (data.id && data.modifiedTime) {
-                    link_data_map.set(source_file_path, { drive_id: data.id, drive_modified_time: data.modifiedTime });
-                    core.debug(` -> Found link data for '${source_file_path}': ID=${data.id}, ModifiedTime=${data.modifiedTime}`);
+                if (data.id && data.modifiedTime && data.name) {
+                    // Reconstruct the *Drive* path using the directory of the link file and the name from the JSON content
+                    const link_dir = path.dirname(file.relative_path);
+                    const drive_file_path = link_dir === '.' ? data.name : path.join(link_dir, data.name);
+                    // Normalize path separators
+                    const normalized_drive_path = drive_file_path.replace(/\\/g, '/');
+                    link_data_map.set(normalized_drive_path, { drive_id: data.id, drive_modified_time: data.modifiedTime });
+                    core.debug(`    -> Found link data for Drive path '${normalized_drive_path}': ID=${data.id}, ModifiedTime=${data.modifiedTime}`);
                 }
                 else {
-                    core.warning(`Skipping link file '${file.relative_path}' due to missing 'id' or 'modifiedTime' fields.`);
+                    core.warning(`Skipping link file '${file.relative_path}' due to missing 'id', 'modifiedTime', or 'name' fields in JSON content.`);
                 }
             }
             catch (error) {
@@ -57,7 +69,7 @@ async function create_link_file_data_map(local_files, link_suffix) {
             }
         }
     }
-    core.info(`Found link data for ${link_data_map.size} source files.`);
+    core.info(`Found link data for ${link_data_map.size} Drive files.`);
     return link_data_map;
 }
 // *** Main sync function ***
@@ -103,8 +115,8 @@ async function sync_main() {
                 // STEP 1.2: Parse link files to get last known Drive state (if visual diffs enabled)
                 let link_file_data_map = new Map();
                 if (enable_visual_diffs) {
-                    // Create the map using the new function
-                    link_file_data_map = await create_link_file_data_map(current_local_files, visual_diff_link_suffix);
+                    // Create the map using the new function and the regex
+                    link_file_data_map = await create_link_file_data_map(current_local_files, LINK_FILE_REGEX);
                 }
                 else {
                     core.info("Skipping link file parsing as visual diffs are disabled.");
@@ -170,20 +182,35 @@ async function sync_main() {
                 // Use Promise.all for potential parallel uploads (adjust concurrency as needed)
                 const uploadPromises = [];
                 const CONCURRENT_UPLOADS = 5; // Limit concurrency to avoid rate limits
-                core.info(`🔥 link_file_data_map: ${JSON.stringify(link_file_data_map, null, 2)}`);
+                core.info(`🔥 link_file_data_map: ${JSON.stringify(Array.from(link_file_data_map.entries()), null, 2)}`); // Log the map content
                 for (const [local_relative_path, local_file] of current_local_map) {
                     // Push an async function to the promises array
                     uploadPromises.push((async () => {
                         core.debug(`Processing local file for outgoing sync: ${local_relative_path}`);
                         // Check if it's a link file first (these are handled by parsing, not upload)
-                        if (enable_visual_diffs && local_relative_path.endsWith(visual_diff_link_suffix)) {
+                        if (enable_visual_diffs && LINK_FILE_REGEX.test(local_relative_path)) {
                             core.debug(` -> Skipping GDrive link file itself: ${local_relative_path}`);
-                            // Determine the source path it corresponds to
-                            const source_path = local_relative_path.substring(0, local_relative_path.length - visual_diff_link_suffix.length);
-                            // Mark the *source* path as processed *if* its link file exists locally.
+                            // Try to determine the *source* path it corresponds to by parsing its content
+                            let source_path = null;
+                            try {
+                                const content = await fs.readFile(local_file.path, 'utf-8');
+                                const data = JSON.parse(content);
+                                if (data.name) {
+                                    const link_dir = path.dirname(local_relative_path);
+                                    source_path = link_dir === '.' ? data.name : path.join(link_dir, data.name);
+                                    source_path = source_path.replace(/\\/g, '/'); // Normalize
+                                }
+                            }
+                            catch (parseError) {
+                                core.warning(`Could not parse link file ${local_relative_path} to determine source path for untracked logic: ${parseError.message}`);
+                            }
+                            // Mark the *source* path as processed *if* we could determine it.
                             // This prevents the Drive file from being wrongly marked as untracked if the
                             // local source file was deleted but the link file hasn't been removed yet.
-                            files_processed_for_outgoing.add(source_path);
+                            if (source_path) {
+                                files_processed_for_outgoing.add(source_path);
+                                core.debug(` -> Marking corresponding Drive path '${source_path}' as processed based on link file.`);
+                            }
                             return; // Skip actual upload of the link file
                         }
                         const drive_comparison_path = local_relative_path; // Use the normalized path
@@ -201,34 +228,40 @@ async function sync_main() {
                             // STEP 1.5.1: Check if Drive has a newer version based on link file data
                             // This check only runs if visual diffs are enabled (implying link files exist),
                             // and if the file exists on Drive with a modification time.
-                            core.info(`🔥🔥🔥`);
-                            core.info(`existing_drive_file?.modifiedTime: ${existing_drive_file?.modifiedTime}`);
+                            core.debug(`🔥🔥🔥 Checking modifiedTime for: ${drive_comparison_path}`);
                             if (enable_visual_diffs && existing_drive_file?.modifiedTime) {
-                                core.info(`/--------------------------`);
-                                core.info(`[Upload Queue] New file: '${local_relative_path}' to folder ${target_folder_id}.`);
+                                core.debug(`/--------------------------`);
                                 const link_data = link_file_data_map.get(drive_comparison_path);
-                                core.info(`drive_comparison_path: ${drive_comparison_path}`);
-                                core.info(`link_data: ${link_data}`);
+                                core.debug(`drive_comparison_path: ${drive_comparison_path}`);
+                                core.debug(`link_data: ${JSON.stringify(link_data)}`);
+                                core.debug(`existing_drive_file.modifiedTime: ${existing_drive_file.modifiedTime}`);
                                 if (link_data?.drive_modified_time) {
                                     // Parse timestamps for comparison
                                     const drive_mod_time_ms = Date.parse(existing_drive_file.modifiedTime);
                                     const link_mod_time_ms = Date.parse(link_data.drive_modified_time);
-                                    core.info(`drive_mod_time_ms: ${drive_mod_time_ms}`);
-                                    core.info(`link_mod_time_ms: ${link_mod_time_ms}`);
+                                    core.debug(`drive_mod_time_ms: ${drive_mod_time_ms}`);
+                                    core.debug(`link_mod_time_ms: ${link_mod_time_ms}`);
                                     // Perform the check only if both timestamps are valid
                                     if (!isNaN(drive_mod_time_ms) && !isNaN(link_mod_time_ms) && drive_mod_time_ms > link_mod_time_ms) {
                                         core.warning(`[Skip Upload] Drive file '${drive_comparison_path}' (ID: ${existing_drive_file.id}) modified at ${existing_drive_file.modifiedTime} is newer than local sync state recorded at ${link_data.drive_modified_time}.`);
+                                        core.debug(`--------------------------/`);
                                         // Skip the rest of the upload/update logic for this file
                                         return;
                                     }
                                     else if (isNaN(drive_mod_time_ms) || isNaN(link_mod_time_ms)) {
                                         core.warning(`Could not parse timestamps for comparison for ${drive_comparison_path}. Drive: ${existing_drive_file.modifiedTime}, Link: ${link_data.drive_modified_time}. Proceeding with default update logic.`);
                                     }
+                                    else {
+                                        core.debug(`Drive file is not newer based on link data timestamps. Proceeding with upload/update logic.`);
+                                    }
                                 }
                                 else {
                                     core.debug(`No link file data found for ${drive_comparison_path}. Proceeding with default update logic.`);
                                 }
-                                core.info(`--------------------------/`);
+                                core.debug(`--------------------------/`);
+                            }
+                            else {
+                                core.debug(`Skipping modifiedTime check: Visual diffs disabled or Drive file/time missing.`);
                             }
                             // STEP 1.5.2: Proceed with upload/update/rename if the modifiedTime check passed or didn't apply
                             if (!existing_drive_file) {
@@ -295,6 +328,8 @@ async function sync_main() {
                 const untracked_drive_folders = Array.from(drive_folders_map.entries())
                     .filter(([folder_path]) => folder_path !== "" && !required_folder_paths.has(folder_path));
                 core.info(`Found ${untracked_drive_files.length} potentially untracked files and ${untracked_drive_folders.length} potentially untracked folders in Drive.`);
+                core.debug(`Files processed (considered for upload/update or skipped as link files): ${Array.from(files_processed_for_outgoing).join(', ')}`);
+                core.debug(`Required folder paths from local structure: ${Array.from(required_folder_paths).join(', ')}`);
                 const all_untracked_items = [
                     ...untracked_drive_files.map(([p, i]) => ({ path: p, item: i, isFolder: false })),
                     ...untracked_drive_folders.map(([p, i]) => ({ path: p, item: i, isFolder: true }))
