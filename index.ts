@@ -215,8 +215,6 @@ async function sync_main() {
         const uploadPromises = [];
         const CONCURRENT_UPLOADS = 5; // Limit concurrency to avoid rate limits
 
-        core.info(`🔥 link_file_data_map: ${JSON.stringify(Array.from(link_file_data_map.entries()), null, 2)}`); // Log the map content
-
         for (const [local_relative_path, local_file] of current_local_map) {
           // Push an async function to the promises array
           uploadPromises.push((async () => {
@@ -265,26 +263,16 @@ async function sync_main() {
               // STEP 1.5.1: Check if Drive has a newer version based on link file data
               // This check only runs if visual diffs are enabled (implying link files exist),
               // and if the file exists on Drive with a modification time.
-              core.debug(`🔥🔥🔥 Checking modifiedTime for: ${drive_comparison_path}`);
-
               if (enable_visual_diffs && existing_drive_file?.modifiedTime) {
-                core.debug(`/--------------------------`);
                 const link_data = link_file_data_map.get(drive_comparison_path);
-                core.debug(`drive_comparison_path: ${drive_comparison_path}`);
-                core.debug(`link_data: ${JSON.stringify(link_data)}`);
-                core.debug(`existing_drive_file.modifiedTime: ${existing_drive_file.modifiedTime}`);
                 if (link_data?.drive_modified_time) {
                   // Parse timestamps for comparison
                   const drive_mod_time_ms = Date.parse(existing_drive_file.modifiedTime);
                   const link_mod_time_ms = Date.parse(link_data.drive_modified_time);
 
-                  core.debug(`drive_mod_time_ms: ${drive_mod_time_ms}`);
-                  core.debug(`link_mod_time_ms: ${link_mod_time_ms}`);
-
                   // Perform the check only if both timestamps are valid
                   if (!isNaN(drive_mod_time_ms) && !isNaN(link_mod_time_ms) && drive_mod_time_ms > link_mod_time_ms) {
                     core.warning(`[Skip Upload] Drive file '${drive_comparison_path}' (ID: ${existing_drive_file.id}) modified at ${existing_drive_file.modifiedTime} is newer than local sync state recorded at ${link_data.drive_modified_time}.`);
-                    core.debug(`--------------------------/`);
                     // Skip the rest of the upload/update logic for this file
                     return;
                   } else if (isNaN(drive_mod_time_ms) || isNaN(link_mod_time_ms)) {
@@ -299,7 +287,6 @@ async function sync_main() {
               } else {
                 core.debug(`Skipping modifiedTime check: Visual diffs disabled or Drive file/time missing.`);
               }
-
 
               // STEP 1.5.2: Proceed with upload/update/rename if the modifiedTime check passed or didn't apply
               if (!existing_drive_file) {
