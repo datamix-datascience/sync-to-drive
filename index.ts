@@ -1,6 +1,7 @@
 import * as core from "@actions/core";
 import * as path from "path";
 import * as github from '@actions/github'; // Need this for context
+import * as fs from "fs/promises"; // Need this for reading link files
 
 // Lib Imports
 import { config } from "./libs/config.js"; // Load config first
@@ -16,6 +17,7 @@ import { handle_drive_changes } from "./libs/sync-logic/handle-drive-changes.js"
 import { GOOGLE_DOC_MIME_TYPES } from "./libs/google-drive/file_types.js";
 import { DriveItem } from "./libs/google-drive/types.js";
 import { generate_visual_diffs_for_pr } from './libs/visual-diffs/generate_visual_diffs.js';
+import { FileInfo } from "./libs/types.js";
 
 // --- Get Inputs ---
 const trigger_event_name = core.getInput('trigger_event_name', { required: true });
@@ -26,6 +28,54 @@ const visual_diff_link_suffix = core.getInput('visual_diff_link_suffix', { requi
 const visual_diff_dpi = parseInt(core.getInput('visual_diff_dpi', { required: false }) || '72', 10); // Default DPI
 const git_user_name = core.getInput('git_user_name', { required: false }) || 'github-actions[bot]';
 const git_user_email = core.getInput('git_user_email', { required: false }) || 'github-actions[bot]@users.noreply.github.com';
+
+// STEP 0: Define interface for the expected structure of the link file
+interface GDriveLinkData {
+  id: string;
+  name: string;
+  modifiedTime: string;
+  // Add other fields if needed, but these are essential
+}
+
+// STEP 0: Define function to parse link files and create mapping
+/**
+ * Parses local files ending with the link_suffix, extracts Drive metadata,
+ * and returns a map linking source file paths to their last known Drive state.
+ * @param local_files List of local files found in the repository.
+ * @param link_suffix The suffix used to identify link files (e.g., '.gdrive.json').
+ * @returns A map where keys are source file relative paths (e.g., 'docs/My Doc.docx')
+ *          and values are objects containing the Drive file ID and modified time.
+ */
+async function create_link_file_data_map(
+  local_files: FileInfo[],
+  link_suffix: string
+): Promise<Map<string, { drive_id: string; drive_modified_time: string }>> {
+  const link_data_map = new Map<string, { drive_id: string; drive_modified_time: string }>();
+  core.info(`Parsing local link files with suffix "${link_suffix}"...`);
+
+  for (const file of local_files) {
+    if (file.relative_path.endsWith(link_suffix)) {
+      // Determine the path of the source file this link file corresponds to
+      const source_file_path = file.relative_path.substring(0, file.relative_path.length - link_suffix.length).replace(/\\/g, '/');
+      try {
+        const content = await fs.readFile(file.path, 'utf-8');
+        const data = JSON.parse(content) as GDriveLinkData;
+        // Ensure essential data is present before adding to the map
+        if (data.id && data.modifiedTime) {
+          link_data_map.set(source_file_path, { drive_id: data.id, drive_modified_time: data.modifiedTime });
+          core.debug(` -> Found link data for '${source_file_path}': ID=${data.id}, ModifiedTime=${data.modifiedTime}`);
+        } else {
+          core.warning(`Skipping link file '${file.relative_path}' due to missing 'id' or 'modifiedTime' fields.`);
+        }
+      } catch (error) {
+        core.warning(`Failed to read or parse link file '${file.relative_path}': ${(error as Error).message}`);
+      }
+    }
+  }
+  core.info(`Found link data for ${link_data_map.size} source files.`);
+  return link_data_map;
+}
+
 
 // *** Main sync function ***
 async function sync_main() {
@@ -67,20 +117,30 @@ async function sync_main() {
       if (trigger_event_name === 'push') {
         core.info("Step 1 & 2: Processing outgoing changes and untracked items (push trigger)...");
 
-        // --- List current local state ---
+        // STEP 1.1: List current local state
         core.info("Listing current local files for outgoing sync...");
         const current_local_files = await list_local_files(".");
         const current_local_map = new Map(current_local_files.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
         core.info(`Found ${current_local_map.size} local files for outgoing sync.`);
 
-        // --- List Drive state ONCE ---
+        // STEP 1.2: Parse link files to get last known Drive state (if visual diffs enabled)
+        let link_file_data_map = new Map<string, { drive_id: string; drive_modified_time: string }>();
+        if (enable_visual_diffs) {
+          // Create the map using the new function
+          link_file_data_map = await create_link_file_data_map(current_local_files, visual_diff_link_suffix);
+        } else {
+          core.info("Skipping link file parsing as visual diffs are disabled.");
+        }
+
+        // STEP 1.3: List Drive state ONCE
         core.info("Listing current Drive content ONCE for comparison and untracked check...");
         let drive_files_map: Map<string, DriveItem>;
         let drive_folders_map: Map<string, DriveItem>;
         let initial_list_found_unowned = false; // Flag for ownership check optimization
 
         try {
-          const drive_data = await list_drive_files_recursively(folder_id); // <<< LIST ONCE
+          // Ensure modifiedTime is requested for the comparison check later
+          const drive_data = await list_drive_files_recursively(folder_id);
           // Create drive_files_map from drive_data.files array
           drive_files_map = new Map(
             drive_data.files.map((file) => [
@@ -122,7 +182,7 @@ async function sync_main() {
           continue; // Skip to next target
         }
 
-        // --- Build Folder Structure ---
+        // STEP 1.4: Build Folder Structure
         core.info("Ensuring Drive folder structure matches local structure...");
         let folder_path_to_id_map: Map<string, string>;
         try {
@@ -133,7 +193,7 @@ async function sync_main() {
           folder_path_to_id_map = new Map([["", folder_id]]);
         }
 
-        // --- Upload/Update Files ---
+        // STEP 1.5: Upload/Update Files (with modifiedTime check)
         core.info("Processing local files for upload/update to Drive...");
         const files_processed_for_outgoing = new Set<string>(); // Track Drive paths corresponding to processed local files
 
@@ -145,15 +205,20 @@ async function sync_main() {
           // Push an async function to the promises array
           uploadPromises.push((async () => {
             core.debug(`Processing local file for outgoing sync: ${local_relative_path}`);
-            if (local_relative_path.endsWith(visual_diff_link_suffix)) {
-              core.debug(` -> Skipping GDrive link file: ${local_relative_path}`);
-              const drive_comparison_path = local_relative_path.substring(0, local_relative_path.length - visual_diff_link_suffix.length);
-              files_processed_for_outgoing.add(drive_comparison_path); // Still track base path
-              return; // Skip actual upload
+            // Check if it's a link file first (these are handled by parsing, not upload)
+            if (enable_visual_diffs && local_relative_path.endsWith(visual_diff_link_suffix)) {
+              core.debug(` -> Skipping GDrive link file itself: ${local_relative_path}`);
+              // Determine the source path it corresponds to
+              const source_path = local_relative_path.substring(0, local_relative_path.length - visual_diff_link_suffix.length);
+              // Mark the *source* path as processed *if* its link file exists locally.
+              // This prevents the Drive file from being wrongly marked as untracked if the
+              // local source file was deleted but the link file hasn't been removed yet.
+              files_processed_for_outgoing.add(source_path);
+              return; // Skip actual upload of the link file
             }
 
-            const drive_comparison_path = local_relative_path;
-            files_processed_for_outgoing.add(drive_comparison_path);
+            const drive_comparison_path = local_relative_path; // Use the normalized path
+            files_processed_for_outgoing.add(drive_comparison_path); // Track that we are considering this path for potential upload/update
 
             const existing_drive_file = drive_files_map.get(drive_comparison_path);
             const drive_target_name = path.basename(drive_comparison_path);
@@ -167,29 +232,59 @@ async function sync_main() {
             }
 
             try {
+              // STEP 1.5.1: Check if Drive has a newer version based on link file data
+              // This check only runs if visual diffs are enabled (implying link files exist),
+              // and if the file exists on Drive with a modification time.
+              if (enable_visual_diffs && existing_drive_file?.modifiedTime) {
+                const link_data = link_file_data_map.get(drive_comparison_path);
+                if (link_data?.drive_modified_time) {
+                  // Parse timestamps for comparison
+                  const drive_mod_time_ms = Date.parse(existing_drive_file.modifiedTime);
+                  const link_mod_time_ms = Date.parse(link_data.drive_modified_time);
+
+                  // Perform the check only if both timestamps are valid
+                  if (!isNaN(drive_mod_time_ms) && !isNaN(link_mod_time_ms) && drive_mod_time_ms > link_mod_time_ms) {
+                    core.warning(`[Skip Upload] Drive file '${drive_comparison_path}' (ID: ${existing_drive_file.id}) modified at ${existing_drive_file.modifiedTime} is newer than local sync state recorded at ${link_data.drive_modified_time}.`);
+                    // Skip the rest of the upload/update logic for this file
+                    return;
+                  } else if (isNaN(drive_mod_time_ms) || isNaN(link_mod_time_ms)) {
+                    core.warning(`Could not parse timestamps for comparison for ${drive_comparison_path}. Drive: ${existing_drive_file.modifiedTime}, Link: ${link_data.drive_modified_time}. Proceeding with default update logic.`);
+                  }
+                } else {
+                  core.debug(`No link file data found for ${drive_comparison_path}. Proceeding with default update logic.`);
+                }
+              }
+
+              // STEP 1.5.2: Proceed with upload/update/rename if the modifiedTime check passed or didn't apply
               if (!existing_drive_file) {
                 core.info(`[Upload Queue] New file: '${local_relative_path}' to folder ${target_folder_id}.`);
                 await upload_file(local_file.path, target_folder_id);
               } else {
+                // Handle Google Docs (primarily renaming)
                 if (GOOGLE_DOC_MIME_TYPES.includes(existing_drive_file.mimeType || '')) {
                   core.debug(` -> Drive file ${existing_drive_file.id} is a Google Doc type.`);
                   if (existing_drive_file.name !== drive_target_name) {
                     core.info(`[Rename Queue] Google Doc '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}).`);
+                    // Note: This rename happens even if the content check was skipped, as it's a metadata change.
                     await drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
                   } else {
                     core.debug(` -> Google Doc name matches.`);
                   }
-                } else {
+                }
+                // Handle regular files (content update or rename)
+                else {
+                  // Use md5Checksum (hash) for binary files if available and different
                   const drive_file_needs_update = (!existing_drive_file.hash || existing_drive_file.hash !== local_file.hash);
                   const drive_file_needs_rename = (existing_drive_file.name !== drive_target_name);
+
                   if (drive_file_needs_update) {
-                    core.info(`[Update Queue] File content '${local_relative_path}' (ID: ${existing_drive_file.id}).`);
+                    core.info(`[Update Queue] File content '${local_relative_path}' (ID: ${existing_drive_file.id}). Hash mismatch (Drive: ${existing_drive_file.hash || 'N/A'}, Local: ${local_file.hash}).`);
                     await upload_file(local_file.path, target_folder_id, { id: existing_drive_file.id, name: existing_drive_file.name });
                   } else if (drive_file_needs_rename) {
-                    core.info(`[Rename Queue] File '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}).`);
+                    core.info(`[Rename Queue] File '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}). Content hash matches.`);
                     await drive.files.update({ fileId: existing_drive_file.id, requestBody: { name: drive_target_name }, fields: "id,name" });
                   } else {
-                    core.debug(` -> File '${local_relative_path}' matches Drive (ID: ${existing_drive_file.id}).`);
+                    core.debug(` -> File '${local_relative_path}' hash and name match Drive (ID: ${existing_drive_file.id}). No update needed.`);
                   }
                 }
               }
@@ -214,15 +309,15 @@ async function sync_main() {
         }
         core.info("Finished processing local files for upload/update.");
 
-        // --- Handle Untracked Files/Folders (using the maps from the single listing) ---
+        // STEP 1.6: Handle Untracked Files/Folders (using the maps from the single listing)
         core.info("Handling untracked items in Drive (using initial listing)...");
-        // No need to re-list Drive content here!
 
-        const untracked_drive_files = Array.from(drive_files_map.entries()) // <<< Use existing map
+        // Identify Drive files/folders whose paths were NOT marked for processing during the upload/update phase
+        const untracked_drive_files = Array.from(drive_files_map.entries())
           .filter(([drive_path]) => !files_processed_for_outgoing.has(drive_path));
 
         const required_folder_paths = new Set(folder_path_to_id_map.keys());
-        const untracked_drive_folders = Array.from(drive_folders_map.entries()) // <<< Use existing map
+        const untracked_drive_folders = Array.from(drive_folders_map.entries())
           .filter(([folder_path]) => folder_path !== "" && !required_folder_paths.has(folder_path));
 
         core.info(`Found ${untracked_drive_files.length} potentially untracked files and ${untracked_drive_folders.length} potentially untracked folders in Drive.`);
@@ -309,14 +404,29 @@ async function sync_main() {
             const pr_data = await octokit.rest.pulls.get({ owner, repo, pull_number: pr_details.pr_number });
             head_sha = pr_data.data.head.sha;
           }
-          if (!head_sha) {
+          // If still no SHA (e.g., triggered by push to the PR branch *after* handle_drive_changes ran but *before* this step)
+          // try getting the ref for the head branch
+          if (!head_sha && pr_details.head_branch) {
             core.debug(`Could not get head SHA from PR context or direct fetch. Trying ref lookup for branch ${pr_details.head_branch}...`);
-            const ref_data = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${pr_details.head_branch}` });
-            head_sha = ref_data.data.object.sha;
+            // Ensure the ref is correctly formatted
+            const ref_lookup = `heads/${pr_details.head_branch}`;
+            core.debug(`Looking up ref: ${ref_lookup}`);
+            try {
+              const ref_data = await octokit.rest.git.getRef({ owner, repo, ref: ref_lookup });
+              head_sha = ref_data.data.object.sha;
+            } catch (refError) {
+              core.warning(`Failed to get ref for ${ref_lookup}: ${(refError as Error).message}`);
+            }
           }
 
           if (!head_sha) {
-            throw new Error(`Could not determine head SHA for branch ${pr_details.head_branch}`);
+            // Final fallback or error if SHA is still missing
+            if (github.context.sha) {
+              core.warning(`Could not determine specific head SHA for branch ${pr_details.head_branch}. Falling back to GITHUB_SHA: ${github.context.sha}`);
+              head_sha = github.context.sha;
+            } else {
+              throw new Error(`Could not determine head SHA for branch ${pr_details.head_branch} or GITHUB_SHA.`);
+            }
           }
           core.info(`Using head SHA ${head_sha} for visual diff source.`);
 
