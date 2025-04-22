@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
 import * as fs from 'fs';
 import * as path from 'path';
-import { is_readable_stream, GOOGLE_WORKSPACE_EXPORTABLE_TYPES, NATIVE_PDF_TYPE } from './types.js';
+import { is_readable_stream, GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES, NATIVE_PDF_TYPE } from './types.js';
 /**
  * Fetches a file from Google Drive, exporting Google Workspace types to PDF
  * and downloading native PDFs directly. Saves the result to a temporary path.
@@ -16,7 +16,7 @@ export async function fetch_drive_file_as_pdf(drive, file_id, mime_type, temp_pd
     core.info(`   - Preparing to fetch content for ID ${file_id} (Type: ${mime_type})`);
     let response_stream = null;
     try {
-        if (GOOGLE_WORKSPACE_EXPORTABLE_TYPES.includes(mime_type)) {
+        if (GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES.includes(mime_type)) {
             core.info(`   - Exporting Google Workspace file as PDF...`);
             const response = await drive.files.export({ fileId: file_id, mimeType: 'application/pdf' }, { responseType: 'stream' });
             if (is_readable_stream(response.data)) {
