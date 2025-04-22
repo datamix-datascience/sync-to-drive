@@ -54,6 +54,12 @@ export async function handle_download_item(
     };
     await fs.promises.mkdir(content_dir, { recursive: true }); // Ensure dir exists
     await fs.promises.writeFile(link_file_path, JSON.stringify(link_data, null, 2));
+
+    // *** ADDED DEBUGGING ***
+    core.info(` --> Successfully wrote link file: ${link_file_path}`);
+    core.debug(`     Link file content: ${JSON.stringify(link_data, null, 2)}`);
+    // *** END ADDED DEBUGGING ***
+
     linkFilePath = link_file_path;
   }
 

@@ -191,6 +191,10 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   const link_file_regex_vd = new RegExp(`--[a-zA-Z0-9_-]+\\.(${known_extensions_vd})\\.gdrive\\.json$`, 'i');
   core.debug(`Using regex to find link files: ${link_file_regex_vd}`);
 
+  // *** ADDED DEBUGGING: Log all files found ***
+  core.info("Listing all files returned by GitHub API for PR diff...");
+  let api_file_count = 0;
+  // *** END ADDED DEBUGGING ***
 
   try {
     const files_iterator = params.octokit.paginate.iterator(params.octokit.rest.pulls.listFiles, {
@@ -199,20 +203,26 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
 
     for await (const { data: files } of files_iterator) {
       for (const file of files) {
-        // Use the regex to test if the filename matches the expected link file pattern
-        if (
-          link_file_regex_vd.test(path.basename(file.filename)) &&
+        api_file_count++; // Increment counter
+        const file_basename = path.basename(file.filename);
+        const is_match = link_file_regex_vd.test(file_basename);
+        const is_relevant_status = (file.status === 'added' || file.status === 'modified' || file.status === 'renamed' || file.status === 'removed');
 
-          (file.status === 'added' || file.status === 'modified' || file.status === 'renamed' || file.status === 'removed')
-        ) {
+        // *** MODIFIED DEBUGGING: Log details for every file ***
+        core.debug(`  - API File #${api_file_count}: Path='${file.filename}', Status='${file.status}', Basename='${file_basename}', RegexMatch=${is_match}, RelevantStatus=${is_relevant_status}`);
+        // *** END MODIFIED DEBUGGING ***
+
+        if (is_match && is_relevant_status) {
           core.info(` -> Found candidate link file: ${file.filename} (Status: ${file.status})`);
           changed_link_file_paths.push(file.filename); // Store the full path
-        } else {
-          core.debug(` -> Skipping file: ${file.filename} (Status: ${file.status}, Pattern mismatch: ${!link_file_regex_vd.test(path.basename(file.filename))})`);
         }
+        // Removed the 'else' block for skipping, as the debug log above covers it.
       }
     }
-    core.info(`Found ${changed_link_file_paths.length} added/modified/renamed/removed link file(s) matching pattern to process.`); // Updated log message
+    // *** ADDED DEBUGGING: Log summary ***
+    core.info(`Finished listing API files. Total files checked: ${api_file_count}.`);
+    // *** END ADDED DEBUGGING ***
+    core.info(`Found ${changed_link_file_paths.length} added/modified/renamed/removed link file(s) matching pattern to process.`);
   } catch (error: any) {
     core.error(`Failed to list PR files via GitHub API: ${error.message}`);
     core.endGroup();
@@ -224,6 +234,9 @@ export async function generate_visual_diffs_for_pr(params: GenerateVisualDiffsPa
   // If no relevant files changed *according to the PR diff*, we don't need to do anything.
   if (changed_link_file_paths.length === 0) {
     core.info('No relevant changed link files found in this PR update. Nothing to generate or commit.');
+    // *** ADDED DEBUGGING: Explicit message before exit ***
+    core.warning('Exiting visual diff generation because no matching link files were identified in the PR diff from the API.');
+    // *** END ADDED DEBUGGING ***
     core.endGroup(); // Close the main group
     return;
   }
