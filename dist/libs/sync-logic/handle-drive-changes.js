@@ -364,12 +364,22 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             core.info("No file system changes were applied. Checking Git status anyway.");
         }
         core.startGroup('Committing Changes and Creating PR');
+        // *** ADDED DEBUGGING ***
+        core.info("Checking filesystem status before staging...");
+        // List files verbosely to see exactly what exists before 'git add'
+        await execute_git('ls', ['-laR'], { silent: false, ignoreReturnCode: true }); // Use 'dir /s /b' on Windows if needed
+        // *** END ADDED DEBUGGING ***
         await execute_git("config", ["--local", "user.email", git_user_email || "github-actions[bot]@users.noreply.github.com"]);
         await execute_git("config", ["--local", "user.name", git_user_name || "github-actions[bot]"]);
         core.info("Staging all detected changes...");
         await execute_git("add", ["."]);
         await execute_git("add", ["-u"]);
+        // *** ADDED DEBUGGING ***
+        core.info("Checking Git status *after* staging:");
+        // *** END ADDED DEBUGGING ***
         const status_result = await execute_git('status', ['--porcelain']);
+        // Log status output regardless of whether it's empty, for debugging
+        core.debug("Git status --porcelain output:\n" + status_result.stdout);
         // Removed duplicate check from this condition
         if (!status_result.stdout.trim()) {
             core.info("Git status is clean. No commit or PR needed.");
@@ -378,7 +388,6 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         }
         // Removed log message about creating PR just for duplicates
         core.info("Git status shows changes. Proceeding with commit.");
-        core.debug("Git status output:\n" + status_result.stdout);
         // Commit message details
         const commit_detail_lines = [];
         // Use drive_items_for_pr_body for Added/Updated list

@@ -18,6 +18,9 @@ export async function fetch_drive_file_as_pdf(drive, file_id, mime_type, temp_pd
     try {
         if (GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES.includes(mime_type)) {
             core.info(`   - Exporting Google Workspace file as PDF...`);
+            // *** ADDED DEBUGGING ***
+            core.debug(`     Attempting drive.files.export({ fileId: '${file_id}', mimeType: 'application/pdf' })`);
+            // *** END ADDED DEBUGGING ***
             const response = await drive.files.export({ fileId: file_id, mimeType: 'application/pdf' }, { responseType: 'stream' });
             if (is_readable_stream(response.data)) {
                 response_stream = response.data;
@@ -28,6 +31,9 @@ export async function fetch_drive_file_as_pdf(drive, file_id, mime_type, temp_pd
         }
         else if (mime_type === NATIVE_PDF_TYPE) {
             core.info(`   - Downloading native PDF file...`);
+            // *** ADDED DEBUGGING ***
+            core.debug(`     Attempting drive.files.get({ fileId: '${file_id}', alt: 'media' })`);
+            // *** END ADDED DEBUGGING ***
             const response = await drive.files.get({ fileId: file_id, alt: 'media' }, { responseType: 'stream' });
             if (is_readable_stream(response.data)) {
                 response_stream = response.data;
@@ -69,18 +75,38 @@ export async function fetch_drive_file_as_pdf(drive, file_id, mime_type, temp_pd
     }
     catch (error) {
         // Log specific Drive API errors
-        const gaxiosError = error; // Type assertion for common error shape
-        if (gaxiosError.code === 404) {
-            core.error(`   - Fetch failed: Google Drive file ID ${file_id} not found (404).`);
+        // Type assertion for common error shape, including GaxiosError properties
+        const gaxiosError = error;
+        // *** ADDED DEBUGGING ***
+        core.error(`   - Error during Drive fetch for File ID ${file_id}:`);
+        core.error(`     Message: ${gaxiosError.message}`);
+        if (gaxiosError.code)
+            core.error(`     Code: ${gaxiosError.code}`); // Often available on lower-level errors
+        if (gaxiosError.response) {
+            core.error(`     Response Status: ${gaxiosError.response.status} ${gaxiosError.response.statusText || ''}`);
+            core.error(`     Response Headers: ${JSON.stringify(gaxiosError.response.headers)}`);
+            core.error(`     Response Data: ${JSON.stringify(gaxiosError.response.data)}`);
         }
-        else if (gaxiosError.code === 403) {
-            core.error(`   - Fetch failed: Permission denied for Google Drive file ID ${file_id} (403). Check Service Account permissions.`);
+        if (gaxiosError.config) {
+            core.error(`     Request Config URL: ${gaxiosError.config.url}`);
+            // Note: config might contain sensitive headers, be cautious logging the whole object
+            // core.error(`     Request Config: ${JSON.stringify(gaxiosError.config)}`);
+        }
+        // Log stack trace for deeper issues if available
+        if (error.stack) {
+            core.debug(`     Stack Trace: ${error.stack}`);
+        }
+        // *** END ADDED DEBUGGING ***
+        // Simplified existing logging based on added detail above
+        const status = gaxiosError.response?.status ?? gaxiosError.code; // Prioritize response status code
+        if (status === 404) {
+            core.error(`   - Fetch failed: Google Drive file ID ${file_id} not found.`);
+        }
+        else if (status === 403) {
+            core.error(`   - Fetch failed: Permission denied for Google Drive file ID ${file_id}. Check Service Account permissions.`);
         }
         else {
-            core.error(`   - Fetch failed for file ID ${file_id}: ${gaxiosError.message}`);
-            if (gaxiosError?.response?.data) {
-                core.error(`   - API Error Details: ${JSON.stringify(gaxiosError.response.data)}`);
-            }
+            core.error(`   - Fetch failed for file ID ${file_id}. See details above.`); // Refer to detailed logs
         }
         // Attempt to clean up potentially incomplete/empty temp file if write didn't start/finish
         await fs.promises.rm(temp_pdf_path, { force: true, recursive: false }).catch(rmErr => {
