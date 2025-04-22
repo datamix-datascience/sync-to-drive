@@ -1,3 +1,5 @@
+import { GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES, NATIVE_PDF_TYPE } from "../visual-diffs/types.js";
+
 export const GOOGLE_DOC_MIME_TYPES = [
   "application/vnd.google-apps.document",
   "application/vnd.google-apps.spreadsheet",
@@ -46,9 +48,13 @@ export const MIME_TYPE_TO_EXTENSION: { [mime_type: string]: string } = {
   "image/svg+xml": "svg",
 };
 
+// Define which types should have a .gdrive.json link file created.
+// This should include Google Docs (only link), PDFs (link + content),
+// AND other office/exportable types (link + content) if we want visual diffs for them.
 export const LINK_FILE_MIME_TYPES = [
-  ...GOOGLE_DOC_MIME_TYPES,
-  "application/pdf"
+  ...GOOGLE_DOC_MIME_TYPES, // Create link files for Google types (no content download)
+  ...GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES.filter(type => !GOOGLE_DOC_MIME_TYPES.includes(type)), // Add exportable types like DOCX, PPTX etc. (link + content download)
+  NATIVE_PDF_TYPE // Ensure native PDF is included (link + content download)
 ];
 
 /**
