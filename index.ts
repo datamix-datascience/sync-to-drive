@@ -201,7 +201,7 @@ async function sync_main() {
         const uploadPromises = [];
         const CONCURRENT_UPLOADS = 5; // Limit concurrency to avoid rate limits
 
-        core.info(`🔥 link_file_data_map: ${link_file_data_map}`);
+        core.info(`🔥 link_file_data_map: ${JSON.stringify(link_file_data_map, null, 2)}`);
 
         for (const [local_relative_path, local_file] of current_local_map) {
           // Push an async function to the promises array
