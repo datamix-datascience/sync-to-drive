@@ -170,6 +170,7 @@ async function sync_main() {
                 // Use Promise.all for potential parallel uploads (adjust concurrency as needed)
                 const uploadPromises = [];
                 const CONCURRENT_UPLOADS = 5; // Limit concurrency to avoid rate limits
+                core.info(`🔥 link_file_data_map: ${link_file_data_map}`);
                 for (const [local_relative_path, local_file] of current_local_map) {
                     // Push an async function to the promises array
                     uploadPromises.push((async () => {
@@ -201,12 +202,12 @@ async function sync_main() {
                             // This check only runs if visual diffs are enabled (implying link files exist),
                             // and if the file exists on Drive with a modification time.
                             core.info(`🔥🔥🔥`);
-                            core.info(`enable_visual_diffs: ${enable_visual_diffs}`);
                             core.info(`existing_drive_file?.modifiedTime: ${existing_drive_file?.modifiedTime}`);
                             if (enable_visual_diffs && existing_drive_file?.modifiedTime) {
                                 core.info(`/--------------------------`);
                                 core.info(`[Upload Queue] New file: '${local_relative_path}' to folder ${target_folder_id}.`);
                                 const link_data = link_file_data_map.get(drive_comparison_path);
+                                core.info(`drive_comparison_path: ${drive_comparison_path}`);
                                 core.info(`link_data: ${link_data}`);
                                 if (link_data?.drive_modified_time) {
                                     // Parse timestamps for comparison
