@@ -44,7 +44,7 @@ export const MIME_TYPE_TO_EXTENSION = {
     "image/png": "png",
     "image/svg+xml": "svg",
     // Notebooks
-    "vnd.google.colaboratory": "ipynb",
+    "application/vnd.google.colaboratory": "ipynb",
 };
 // Define which types should have a .gdrive.json link file created.
 // This should include Google Docs (only link), PDFs (link + content),
