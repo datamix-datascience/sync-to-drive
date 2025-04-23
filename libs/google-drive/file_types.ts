@@ -48,7 +48,7 @@ export const MIME_TYPE_TO_EXTENSION: { [mime_type: string]: string } = {
   "image/svg+xml": "svg",
 
   // Notebooks
-  "vnd.google.colaboratory": "ipynb",
+  "application/vnd.google.colaboratory": "ipynb",
 };
 
 // Define which types should have a .gdrive.json link file created.
