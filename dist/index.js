@@ -533,6 +533,15 @@ async function sync_main() {
                     if (!gemini_api_key) {
                         throw new Error("gemini_api_key is required when enable_slide_compare is true.");
                     }
+                    // GitHub Token: Use the one provided by the action input
+                    // This is explicitly set here to ensure the slide-compare module has access to it
+                    process.env.GITHUB_TOKEN = core.getInput("github_token");
+                    if (!process.env.GITHUB_TOKEN) {
+                        core.warning("github_token is not set correctly, slide comparison may fail to access GitHub API");
+                    }
+                    else {
+                        core.info("GitHub token is properly set for slide comparison");
+                    }
                     // Set environment variables for compare-images
                     process.env.GEMINI_API_KEY = gemini_api_key;
                     process.env.PR_NUMBER = pr_details.pr_number.toString();
@@ -560,6 +569,12 @@ async function sync_main() {
                 }
                 catch (compareError) {
                     core.error(`Slide comparison failed: ${compareError.message}`);
+                    // Add more detailed error information
+                    if (compareError.status) {
+                        core.error(`Status code: ${compareError.status}`);
+                    }
+                    // Log stack trace for debugging
+                    core.debug(`Stack trace: ${compareError.stack}`);
                     // Don't mark operation as failed since this is an enhancement feature
                 }
             }

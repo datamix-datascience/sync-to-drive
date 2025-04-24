@@ -105,12 +105,14 @@ export async function getChangedImageFiles(owner, repo, prNumber, diffDir = "_di
         auth: process.env.GITHUB_TOKEN,
     });
     try {
+        console.log(`Attempting to fetch files for PR #${prNumber} in ${owner}/${repo}`);
         // Get the list of files changed in the PR
         const { data: files } = await octokit.pulls.listFiles({
             owner,
             repo,
             pull_number: prNumber,
         });
+        console.log(`Successfully fetched ${files.length} files from PR`);
         // Filter files that are images in the diff directory
         return files
             .filter((file) => file.filename.startsWith(diffDir + "/") &&
@@ -121,8 +123,24 @@ export async function getChangedImageFiles(owner, repo, prNumber, diffDir = "_di
             .map((file) => file.filename);
     }
     catch (error) {
-        console.error("Error getting changed files:", error);
-        return [];
+        // Check for 404 errors (PR not found or no permissions)
+        if (error.status === 404) {
+            console.log(`PR #${prNumber} not found or no access permissions. This is normal for some workflows.`);
+            return []; // Return empty array instead of failing
+        }
+        // Check for authentication errors
+        if (error.status === 401 || error.status === 403) {
+            console.error(`Authentication error: GitHub token may not have sufficient permissions.`);
+            console.error(`Required permissions: pull_requests:read, contents:read`);
+            return []; // Return empty array
+        }
+        console.error(`Error getting changed files for PR #${prNumber}:`, error.message);
+        if (error.response) {
+            console.error(`Status: ${error.response.status}, GitHub message: ${error.response.data?.message || "No message"}`);
+        }
+        // For debugging purposes, check if the token is available (without revealing it)
+        console.log(`GitHub token available: ${!!process.env.GITHUB_TOKEN}`);
+        return []; // Return empty array on errors
     }
 }
 /**
