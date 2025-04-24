@@ -71,10 +71,40 @@ export async function fetchBase64(
         throw new Error(errorMsg);
       }
 
-      const contentType =
+      // オリジナルのContent-Typeを取得
+      const originalContentType =
         res.headers.get("content-type") || "application/octet-stream";
+
+      // Gemini APIがサポートするMIMEタイプに変換
+      // GitHub APIからのapplication/vnd.github.v3.raw; charset=utf-8などの応答を変換
+      let mimeType = originalContentType;
+
+      // GitHub APIの特殊なMIMEタイプを処理
+      if (mimeType.includes("application/vnd.github.v3.raw")) {
+        // 画像ファイルのパス拡張子で判定
+        if (url.toLowerCase().endsWith(".png")) {
+          mimeType = "image/png";
+        } else if (url.toLowerCase().match(/\.(jpg|jpeg)$/)) {
+          mimeType = "image/jpeg";
+        } else if (url.toLowerCase().endsWith(".webp")) {
+          mimeType = "image/webp";
+        } else {
+          // デフォルトは画像ファイルと見なす
+          mimeType = "image/png";
+        }
+      }
+
+      // charset部分を削除（Gemini APIが対応していないため）
+      if (mimeType.includes(";")) {
+        mimeType = mimeType.split(";")[0].trim();
+      }
+
+      console.log(
+        `Original content type: ${originalContentType}, using: ${mimeType}`
+      );
+
       const buffer = Buffer.from(await res.arrayBuffer());
-      return { data: buffer.toString("base64"), mimeType: contentType };
+      return { data: buffer.toString("base64"), mimeType: mimeType };
     } catch (error: any) {
       if (attempt < maxRetries) {
         console.log(
