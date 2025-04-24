@@ -13,7 +13,10 @@ export async function fetchBase64(url) {
     const headers = {};
     if (process.env.GITHUB_TOKEN) {
         console.log("Adding GitHub token for authenticated fetch");
-        headers["Authorization"] = `token ${process.env.GITHUB_TOKEN}`;
+        // GitHub APIのベストプラクティスに合わせて認証ヘッダーを設定
+        headers["Authorization"] = `Bearer ${process.env.GITHUB_TOKEN}`;
+        // GitHub APIからrawコンテンツを取得するためのAcceptヘッダーを追加
+        headers["Accept"] = "application/vnd.github.v3.raw";
     }
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
