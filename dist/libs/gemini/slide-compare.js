@@ -104,7 +104,7 @@ export async function summarizeImageDiff(url1, url2) {
     const image2 = await fetchBase64(url2);
     // Prepare the multimodal prompt
     const contents = createUserContent([
-        "以下の2つの画像の違いを要約してください。",
+        "1枚目はドキュメントの変更前、2枚目は変更後の画像です。どんな変更が加わったかを要約してください。",
         { inlineData: { mimeType: image1.mimeType, data: image1.data } },
         { inlineData: { mimeType: image2.mimeType, data: image2.data } },
     ]);
@@ -116,6 +116,31 @@ export async function summarizeImageDiff(url1, url2) {
     console.log("Difference summary:");
     console.log(response.text);
     return response.text || "No differences detected";
+}
+/**
+ * Summarizes the content of a newly added image using Gemini API.
+ */
+export async function summarizeNewImage(url) {
+    // Initialize the Gemini client; ensure GEMINI_API_KEY env var is set
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    // Fetch and encode the image
+    console.log(`Fetching new image to analyze from URL: ${url.substring(0, 50)}...`);
+    const image = await fetchBase64(url);
+    console.log(`New image fetched successfully, MIME type: ${image.mimeType}`);
+    // Prepare the multimodal prompt
+    const contents = createUserContent([
+        "これは新規に追加されたドキュメントです。その内容を要約してください。",
+        { inlineData: { mimeType: image.mimeType, data: image.data } },
+    ]);
+    // Call Gemini model
+    console.log(`Calling Gemini model for new image analysis...`);
+    const response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents,
+    });
+    console.log("New image content summary:");
+    console.log(response.text);
+    return response.text || "Could not analyze image content";
 }
 /**
  * Gets image URLs for before and after versions of a file in a PR.
@@ -369,6 +394,19 @@ export async function generatePRComment(owner, repo, prNumber, diffDir = "_diff_
                     else if (encodedAfter) {
                         // Only after exists - new slide
                         commentParts.push("**New Slide Added**\n");
+                        // 新規追加された画像の内容を要約する
+                        try {
+                            console.log(`Analyzing new image content for: ${file}`);
+                            const contentSummary = await summarizeNewImage(encodedAfter);
+                            console.log(`New image content summary generated successfully.`);
+                            commentParts.push("**Content:**\n");
+                            commentParts.push(contentSummary + "\n");
+                        }
+                        catch (contentError) {
+                            console.error(`Failed to analyze new image content: ${contentError.message}`);
+                            commentParts.push("**Error analyzing image content:**\n");
+                            commentParts.push(`Could not generate content summary due to error: ${contentError.message}\n`);
+                        }
                     }
                     else if (encodedBefore) {
                         // Only before exists - deleted slide

@@ -166,7 +166,11 @@ export async function summarizeNewImage(url: string): Promise<string> {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
   // Fetch and encode the image
+  console.log(
+    `Fetching new image to analyze from URL: ${url.substring(0, 50)}...`
+  );
   const image = await fetchBase64(url);
+  console.log(`New image fetched successfully, MIME type: ${image.mimeType}`);
 
   // Prepare the multimodal prompt
   const contents = createUserContent([
@@ -175,6 +179,7 @@ export async function summarizeNewImage(url: string): Promise<string> {
   ]);
 
   // Call Gemini model
+  console.log(`Calling Gemini model for new image analysis...`);
   const response = await ai.models.generateContent({
     model: "gemini-2.0-flash",
     contents,
@@ -520,7 +525,9 @@ export async function generatePRComment(
 
             // 新規追加された画像の内容を要約する
             try {
+              console.log(`Analyzing new image content for: ${file}`);
               const contentSummary = await summarizeNewImage(encodedAfter);
+              console.log(`New image content summary generated successfully.`);
               commentParts.push("**Content:**\n");
               commentParts.push(contentSummary + "\n");
             } catch (contentError: any) {
