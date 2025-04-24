@@ -5,6 +5,7 @@ import fetch from "node-fetch";
 /**
  * Fetches an image from a URL and converts it to base64 along with its MIME type.
  * Includes retry logic for transient failures.
+ * Now with added authentication for private repositories.
  */
 export async function fetchBase64(
   url: string
@@ -12,13 +13,29 @@ export async function fetchBase64(
   const maxRetries = 3;
   const retryDelay = 2000; // 2 seconds between retries
 
+  // 認証用ヘッダーを準備（プライベートリポジトリ対応）
+  const headers: Record<string, string> = {};
+  if (process.env.GITHUB_TOKEN) {
+    console.log("Adding GitHub token for authenticated fetch");
+    headers["Authorization"] = `token ${process.env.GITHUB_TOKEN}`;
+  }
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`Fetching image (attempt ${attempt}/${maxRetries}): ${url}`);
-      const res = await fetch(url);
+      const res = await fetch(url, { headers });
 
       if (!res.ok) {
         const errorMsg = `Failed to fetch image: ${res.status} ${res.statusText}`;
+        console.log(
+          `Response headers: ${JSON.stringify(
+            [...res.headers.entries()].reduce(
+              (obj, [key, val]) => ({ ...obj, [key]: val }),
+              {}
+            )
+          )}`
+        );
+
         if (attempt < maxRetries) {
           console.log(
             `${errorMsg} - Retrying in ${retryDelay / 1000} seconds...`
@@ -131,16 +148,27 @@ export async function getBeforeAfterUrls(
     // Check if the file exists in the base and head
     let beforeExists = false;
     let afterExists = false;
+    let beforeDownloadUrl = "";
+    let afterDownloadUrl = "";
 
     try {
-      await octokit.repos.getContent({
+      // ファイルの内容ではなく、メタデータを取得（より効率的）
+      const { data: baseContent } = await octokit.repos.getContent({
         owner,
         repo,
         path: filePath, // 元のパスを使用
         ref: baseCommit,
       });
-      beforeExists = true;
-      console.log(`File exists in base commit: ${baseCommit}`);
+
+      // 複数ファイルが返ってきた場合は対象外
+      if (!Array.isArray(baseContent)) {
+        beforeExists = true;
+        // ファイルのdirectダウンロードURLを取得
+        beforeDownloadUrl = baseContent.download_url || "";
+        console.log(
+          `File exists in base commit: ${baseCommit}, download URL: ${beforeDownloadUrl}`
+        );
+      }
     } catch (error: any) {
       console.log(
         `File ${filePath} does not exist in base commit ${baseCommit}: ${error.message}`
@@ -148,14 +176,23 @@ export async function getBeforeAfterUrls(
     }
 
     try {
-      await octokit.repos.getContent({
+      // ファイルの内容ではなく、メタデータを取得（より効率的）
+      const { data: headContent } = await octokit.repos.getContent({
         owner,
         repo,
         path: filePath, // 元のパスを使用
         ref: headCommit,
       });
-      afterExists = true;
-      console.log(`File exists in head commit: ${headCommit}`);
+
+      // 複数ファイルが返ってきた場合は対象外
+      if (!Array.isArray(headContent)) {
+        afterExists = true;
+        // ファイルのdirectダウンロードURLを取得
+        afterDownloadUrl = headContent.download_url || "";
+        console.log(
+          `File exists in head commit: ${headCommit}, download URL: ${afterDownloadUrl}`
+        );
+      }
     } catch (error: any) {
       console.log(
         `File ${filePath} does not exist in head commit ${headCommit}: ${error.message}`
@@ -167,9 +204,14 @@ export async function getBeforeAfterUrls(
       return null;
     }
 
-    // Construct raw GitHub URLs with encoded path for actual fetch
-    const baseUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${baseCommit}/${encodedPath}`;
-    const headUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${headCommit}/${encodedPath}`;
+    // GitHub APIから直接提供されたダウンロードURLを使用（認証がそのまま有効）
+    // 直接URLが取得できなかった場合、raw.githubusercontent.comのURLにフォールバック
+    const baseUrl =
+      beforeDownloadUrl ||
+      `https://raw.githubusercontent.com/${owner}/${repo}/${baseCommit}/${encodedPath}`;
+    const headUrl =
+      afterDownloadUrl ||
+      `https://raw.githubusercontent.com/${owner}/${repo}/${headCommit}/${encodedPath}`;
 
     console.log(`Generated URLs:
     Before (exists=${beforeExists}): ${baseUrl}
