@@ -23,10 +23,23 @@ export async function fetchBase64(
     headers["Accept"] = "application/vnd.github.v3.raw";
   }
 
+  // raw.githubusercontent.com形式のURLをapi.github.com形式に変換
+  let apiUrl = url;
+  const rawGithubMatch = url.match(
+    /https:\/\/raw\.githubusercontent\.com\/([^\/]+)\/([^\/]+)\/([^\/]+)\/(.+)/
+  );
+  if (rawGithubMatch) {
+    const [, owner, repo, ref, path] = rawGithubMatch;
+    apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${ref}`;
+    console.log(`URL converted from raw to API format: ${apiUrl}`);
+  }
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`Fetching image (attempt ${attempt}/${maxRetries}): ${url}`);
-      const res = await fetch(url, { headers });
+      console.log(
+        `Fetching image (attempt ${attempt}/${maxRetries}): ${apiUrl}`
+      );
+      const res = await fetch(apiUrl, { headers });
 
       if (!res.ok) {
         const errorMsg = `Failed to fetch image: ${res.status} ${res.statusText}`;
@@ -208,13 +221,13 @@ export async function getBeforeAfterUrls(
     }
 
     // GitHub APIから直接提供されたダウンロードURLを使用（認証がそのまま有効）
-    // 直接URLが取得できなかった場合、raw.githubusercontent.comのURLにフォールバック
+    // 直接URLが取得できなかった場合、API URLを使用
     const baseUrl =
       beforeDownloadUrl ||
-      `https://raw.githubusercontent.com/${owner}/${repo}/${baseCommit}/${encodedPath}`;
+      `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath}?ref=${baseCommit}`;
     const headUrl =
       afterDownloadUrl ||
-      `https://raw.githubusercontent.com/${owner}/${repo}/${headCommit}/${encodedPath}`;
+      `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath}?ref=${headCommit}`;
 
     console.log(`Generated URLs:
     Before (exists=${beforeExists}): ${baseUrl}
