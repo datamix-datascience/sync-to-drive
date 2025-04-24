@@ -477,15 +477,7 @@ export async function generatePRComment(
               commentParts.push("**Changes:**\n");
               commentParts.push(diffSummary + "\n");
 
-              // Add links to the images
-              commentParts.push(
-                `<details><summary>Before/After Images</summary>\n\n`
-              );
-              commentParts.push(`**Before:**\n`);
-              commentParts.push(`![Before](${encodedBefore})\n\n`);
-              commentParts.push(`**After:**\n`);
-              commentParts.push(`![After](${encodedAfter})\n`);
-              commentParts.push(`</details>\n`);
+              // 画像リンクを削除
             } catch (compareError: any) {
               console.error(
                 `Failed to compare images: ${compareError.message}`
@@ -494,25 +486,13 @@ export async function generatePRComment(
               commentParts.push(
                 `Could not generate comparison due to error: ${compareError.message}\n`
               );
-
-              // Still include the images if possible
-              commentParts.push(
-                `<details><summary>Before/After Images (No comparison available)</summary>\n\n`
-              );
-              commentParts.push(`**Before:**\n`);
-              commentParts.push(`![Before](${encodedBefore})\n\n`);
-              commentParts.push(`**After:**\n`);
-              commentParts.push(`![After](${encodedAfter})\n`);
-              commentParts.push(`</details>\n`);
             }
           } else if (encodedAfter) {
             // Only after exists - new slide
             commentParts.push("**New Slide Added**\n");
-            commentParts.push(`![New Slide](${encodedAfter})\n`);
           } else if (encodedBefore) {
             // Only before exists - deleted slide
             commentParts.push("**Slide Deleted**\n");
-            commentParts.push(`![Deleted Slide](${encodedBefore})\n`);
           }
         }
       } catch (fileError: any) {
