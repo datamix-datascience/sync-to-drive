@@ -159,6 +159,33 @@ export async function summarizeImageDiff(
 }
 
 /**
+ * Summarizes the content of a newly added image using Gemini API.
+ */
+export async function summarizeNewImage(url: string): Promise<string> {
+  // Initialize the Gemini client; ensure GEMINI_API_KEY env var is set
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+
+  // Fetch and encode the image
+  const image = await fetchBase64(url);
+
+  // Prepare the multimodal prompt
+  const contents = createUserContent([
+    "これは新規に追加されたドキュメントです。その内容を要約してください。",
+    { inlineData: { mimeType: image.mimeType, data: image.data } },
+  ]);
+
+  // Call Gemini model
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents,
+  });
+
+  console.log("New image content summary:");
+  console.log(response.text);
+  return response.text || "Could not analyze image content";
+}
+
+/**
  * Gets image URLs for before and after versions of a file in a PR.
  */
 export async function getBeforeAfterUrls(
@@ -490,6 +517,21 @@ export async function generatePRComment(
           } else if (encodedAfter) {
             // Only after exists - new slide
             commentParts.push("**New Slide Added**\n");
+
+            // 新規追加された画像の内容を要約する
+            try {
+              const contentSummary = await summarizeNewImage(encodedAfter);
+              commentParts.push("**Content:**\n");
+              commentParts.push(contentSummary + "\n");
+            } catch (contentError: any) {
+              console.error(
+                `Failed to analyze new image content: ${contentError.message}`
+              );
+              commentParts.push("**Error analyzing image content:**\n");
+              commentParts.push(
+                `Could not generate content summary due to error: ${contentError.message}\n`
+              );
+            }
           } else if (encodedBefore) {
             // Only before exists - deleted slide
             commentParts.push("**Slide Deleted**\n");
