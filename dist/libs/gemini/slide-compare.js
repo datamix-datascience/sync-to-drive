@@ -23,7 +23,16 @@ export async function fetchBase64(url) {
     const rawGithubMatch = url.match(/https:\/\/raw\.githubusercontent\.com\/([^\/]+)\/([^\/]+)\/([^\/]+)\/(.+)/);
     if (rawGithubMatch) {
         const [, owner, repo, ref, path] = rawGithubMatch;
-        apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${ref}`;
+        // パスからクエリパラメータを分離
+        let cleanPath = path;
+        // ?や%3Fで始まるクエリパラメータを削除
+        if (cleanPath.includes("?")) {
+            cleanPath = cleanPath.split("?")[0];
+        }
+        if (cleanPath.includes("%3F")) {
+            cleanPath = cleanPath.split("%3F")[0];
+        }
+        apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${cleanPath}?ref=${ref}`;
         console.log(`URL converted from raw to API format: ${apiUrl}`);
     }
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -105,10 +114,26 @@ export async function getBeforeAfterUrls(owner, repo, prNumber, filePath) {
             .map((segment) => {
             // すでにエンコードされている場合は二重エンコードを避ける
             try {
-                return encodeURIComponent(decodeURIComponent(segment));
+                // ?や%3Fで始まるクエリパラメータがある場合、それを除去
+                let cleanSegment = segment;
+                if (cleanSegment.includes("?")) {
+                    cleanSegment = cleanSegment.split("?")[0];
+                }
+                if (cleanSegment.includes("%3F")) {
+                    cleanSegment = cleanSegment.split("%3F")[0];
+                }
+                return encodeURIComponent(decodeURIComponent(cleanSegment));
             }
             catch (e) {
-                return encodeURIComponent(segment);
+                // ?や%3Fで始まるクエリパラメータがある場合、それを除去
+                let cleanSegment = segment;
+                if (cleanSegment.includes("?")) {
+                    cleanSegment = cleanSegment.split("?")[0];
+                }
+                if (cleanSegment.includes("%3F")) {
+                    cleanSegment = cleanSegment.split("%3F")[0];
+                }
+                return encodeURIComponent(cleanSegment);
             }
         })
             .join("/");
@@ -258,7 +283,17 @@ export async function generatePRComment(owner, repo, prNumber, diffDir = "_diff_
                 // エンコードされたファイルパスを使用する
                 const encodedFile = file
                     .split("/")
-                    .map((segment) => encodeURIComponent(segment))
+                    .map((segment) => {
+                    // クエリパラメータがある場合は取り除く
+                    let cleanSegment = segment;
+                    if (cleanSegment.includes("?")) {
+                        cleanSegment = cleanSegment.split("?")[0];
+                    }
+                    if (cleanSegment.includes("%3F")) {
+                        cleanSegment = cleanSegment.split("%3F")[0];
+                    }
+                    return encodeURIComponent(cleanSegment);
+                })
                     .join("/");
                 console.log(`Processing slide: ${file} (encoded: ${encodedFile})`);
                 const urls = await getBeforeAfterUrls(owner, repo, prNumber, file);
@@ -266,10 +301,30 @@ export async function generatePRComment(owner, repo, prNumber, diffDir = "_diff_
                     commentParts.push(`### Slide ${slidePage.replace(".png", "")}\n`);
                     // URLにエンコードを適用
                     const encodedBefore = urls.before
-                        ? urls.before.replace(/\/([^/]+)$/, (match, fileName) => `/${encodeURIComponent(fileName)}`)
+                        ? urls.before.replace(/\/([^/]+)$/, (match, fileName) => {
+                            // クエリパラメータがある場合は取り除く
+                            let cleanFileName = fileName;
+                            if (cleanFileName.includes("?")) {
+                                cleanFileName = cleanFileName.split("?")[0];
+                            }
+                            if (cleanFileName.includes("%3F")) {
+                                cleanFileName = cleanFileName.split("%3F")[0];
+                            }
+                            return `/${encodeURIComponent(cleanFileName)}`;
+                        })
                         : "";
                     const encodedAfter = urls.after
-                        ? urls.after.replace(/\/([^/]+)$/, (match, fileName) => `/${encodeURIComponent(fileName)}`)
+                        ? urls.after.replace(/\/([^/]+)$/, (match, fileName) => {
+                            // クエリパラメータがある場合は取り除く
+                            let cleanFileName = fileName;
+                            if (cleanFileName.includes("?")) {
+                                cleanFileName = cleanFileName.split("?")[0];
+                            }
+                            if (cleanFileName.includes("%3F")) {
+                                cleanFileName = cleanFileName.split("%3F")[0];
+                            }
+                            return `/${encodeURIComponent(cleanFileName)}`;
+                        })
                         : "";
                     if (encodedBefore && encodedAfter) {
                         // Both before and after exist - compare them
