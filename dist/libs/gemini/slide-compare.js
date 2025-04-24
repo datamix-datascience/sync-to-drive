@@ -3,15 +3,41 @@ import { Octokit } from "@octokit/rest";
 import fetch from "node-fetch";
 /**
  * Fetches an image from a URL and converts it to base64 along with its MIME type.
+ * Includes retry logic for transient failures.
  */
 export async function fetchBase64(url) {
-    const res = await fetch(url);
-    if (!res.ok) {
-        throw new Error(`Failed to fetch image: ${res.status} ${res.statusText}`);
+    const maxRetries = 3;
+    const retryDelay = 2000; // 2 seconds between retries
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            console.log(`Fetching image (attempt ${attempt}/${maxRetries}): ${url}`);
+            const res = await fetch(url);
+            if (!res.ok) {
+                const errorMsg = `Failed to fetch image: ${res.status} ${res.statusText}`;
+                if (attempt < maxRetries) {
+                    console.log(`${errorMsg} - Retrying in ${retryDelay / 1000} seconds...`);
+                    await new Promise((resolve) => setTimeout(resolve, retryDelay));
+                    continue;
+                }
+                throw new Error(errorMsg);
+            }
+            const contentType = res.headers.get("content-type") || "application/octet-stream";
+            const buffer = Buffer.from(await res.arrayBuffer());
+            return { data: buffer.toString("base64"), mimeType: contentType };
+        }
+        catch (error) {
+            if (attempt < maxRetries) {
+                console.log(`Error during fetch attempt ${attempt}: ${error.message} - Retrying in ${retryDelay / 1000} seconds...`);
+                await new Promise((resolve) => setTimeout(resolve, retryDelay));
+            }
+            else {
+                console.error(`All ${maxRetries} fetch attempts failed for URL: ${url}`);
+                throw error; // Re-throw the last error after all retries fail
+            }
+        }
     }
-    const contentType = res.headers.get("content-type") || "application/octet-stream";
-    const buffer = Buffer.from(await res.arrayBuffer());
-    return { data: buffer.toString("base64"), mimeType: contentType };
+    // This should never execute because the last failure will throw in the catch block
+    throw new Error(`Failed to fetch image after ${maxRetries} attempts: ${url}`);
 }
 /**
  * Summarizes the differences between two images using Gemini API.
