@@ -821,6 +821,12 @@ async function sync_main() {
         core.info(
           "Step 6: Comparing slide images and generating PR comment..."
         );
+
+        // Add a 10-second wait before starting Step 6 processing
+        core.info("Waiting 10 seconds before processing slide comparisons...");
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+        core.info("Wait complete. Proceeding with slide comparison...");
+
         try {
           if (!gemini_api_key) {
             throw new Error(
