@@ -79,6 +79,21 @@ export async function getBeforeAfterUrls(owner, repo, prNumber, filePath) {
         });
         const baseCommit = pr.base.sha;
         const headCommit = pr.head.sha;
+        // パスをURIコンポーネントに分割してエンコード
+        // '/path/to/file.png' → '/path/to/file.png'のように各セグメントをエンコード
+        const encodedPath = filePath
+            .split("/")
+            .map((segment) => {
+            // すでにエンコードされている場合は二重エンコードを避ける
+            try {
+                return encodeURIComponent(decodeURIComponent(segment));
+            }
+            catch (e) {
+                return encodeURIComponent(segment);
+            }
+        })
+            .join("/");
+        console.log(`Checking file existence: ${filePath} (encoded: ${encodedPath})`);
         // Check if the file exists in the base and head
         let beforeExists = false;
         let afterExists = false;
@@ -86,40 +101,48 @@ export async function getBeforeAfterUrls(owner, repo, prNumber, filePath) {
             await octokit.repos.getContent({
                 owner,
                 repo,
-                path: filePath,
+                path: filePath, // 元のパスを使用
                 ref: baseCommit,
             });
             beforeExists = true;
+            console.log(`File exists in base commit: ${baseCommit}`);
         }
         catch (error) {
-            console.log(`File ${filePath} does not exist in base commit ${baseCommit}`);
+            console.log(`File ${filePath} does not exist in base commit ${baseCommit}: ${error.message}`);
         }
         try {
             await octokit.repos.getContent({
                 owner,
                 repo,
-                path: filePath,
+                path: filePath, // 元のパスを使用
                 ref: headCommit,
             });
             afterExists = true;
+            console.log(`File exists in head commit: ${headCommit}`);
         }
         catch (error) {
-            console.log(`File ${filePath} does not exist in head commit ${headCommit}`);
+            console.log(`File ${filePath} does not exist in head commit ${headCommit}: ${error.message}`);
         }
         // If the file doesn't exist in either commit, return null
         if (!beforeExists && !afterExists) {
             return null;
         }
-        // Construct raw GitHub URLs
-        const baseUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${baseCommit}/${filePath}`;
-        const headUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${headCommit}/${filePath}`;
+        // Construct raw GitHub URLs with encoded path for actual fetch
+        const baseUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${baseCommit}/${encodedPath}`;
+        const headUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${headCommit}/${encodedPath}`;
+        console.log(`Generated URLs:
+    Before (exists=${beforeExists}): ${baseUrl}
+    After (exists=${afterExists}): ${headUrl}`);
         return {
             before: beforeExists ? baseUrl : "",
             after: afterExists ? headUrl : "",
         };
     }
     catch (error) {
-        console.error("Error getting PR details:", error);
+        console.error(`Error getting PR details: ${error.message}`);
+        if (error.stack) {
+            console.debug(error.stack);
+        }
         return null;
     }
 }
@@ -194,33 +217,67 @@ export async function generatePRComment(owner, repo, prNumber, diffDir = "_diff_
         commentParts.push(`## ${slideName}\n`);
         // Process each file (slide)
         for (const file of files) {
-            const slidePage = file.split("/").pop() || "";
-            const urls = await getBeforeAfterUrls(owner, repo, prNumber, file);
-            if (urls && (urls.before || urls.after)) {
-                commentParts.push(`### Slide ${slidePage.replace(".png", "")}\n`);
-                if (urls.before && urls.after) {
-                    // Both before and after exist - compare them
-                    const diffSummary = await summarizeImageDiff(urls.before, urls.after);
-                    commentParts.push("**Changes:**\n");
-                    commentParts.push(diffSummary + "\n");
-                    // Add links to the images
-                    commentParts.push(`<details><summary>Before/After Images</summary>\n\n`);
-                    commentParts.push(`**Before:**\n`);
-                    commentParts.push(`![Before](${urls.before})\n\n`);
-                    commentParts.push(`**After:**\n`);
-                    commentParts.push(`![After](${urls.after})\n`);
-                    commentParts.push(`</details>\n`);
+            try {
+                const slidePage = file.split("/").pop() || "";
+                // エンコードされたファイルパスを使用する
+                const encodedFile = file
+                    .split("/")
+                    .map((segment) => encodeURIComponent(segment))
+                    .join("/");
+                console.log(`Processing slide: ${file} (encoded: ${encodedFile})`);
+                const urls = await getBeforeAfterUrls(owner, repo, prNumber, file);
+                if (urls && (urls.before || urls.after)) {
+                    commentParts.push(`### Slide ${slidePage.replace(".png", "")}\n`);
+                    // URLにエンコードを適用
+                    const encodedBefore = urls.before
+                        ? urls.before.replace(/\/([^/]+)$/, (match, fileName) => `/${encodeURIComponent(fileName)}`)
+                        : "";
+                    const encodedAfter = urls.after
+                        ? urls.after.replace(/\/([^/]+)$/, (match, fileName) => `/${encodeURIComponent(fileName)}`)
+                        : "";
+                    if (encodedBefore && encodedAfter) {
+                        // Both before and after exist - compare them
+                        try {
+                            const diffSummary = await summarizeImageDiff(encodedBefore, encodedAfter);
+                            commentParts.push("**Changes:**\n");
+                            commentParts.push(diffSummary + "\n");
+                            // Add links to the images
+                            commentParts.push(`<details><summary>Before/After Images</summary>\n\n`);
+                            commentParts.push(`**Before:**\n`);
+                            commentParts.push(`![Before](${encodedBefore})\n\n`);
+                            commentParts.push(`**After:**\n`);
+                            commentParts.push(`![After](${encodedAfter})\n`);
+                            commentParts.push(`</details>\n`);
+                        }
+                        catch (compareError) {
+                            console.error(`Failed to compare images: ${compareError.message}`);
+                            commentParts.push("**Error comparing images:**\n");
+                            commentParts.push(`Could not generate comparison due to error: ${compareError.message}\n`);
+                            // Still include the images if possible
+                            commentParts.push(`<details><summary>Before/After Images (No comparison available)</summary>\n\n`);
+                            commentParts.push(`**Before:**\n`);
+                            commentParts.push(`![Before](${encodedBefore})\n\n`);
+                            commentParts.push(`**After:**\n`);
+                            commentParts.push(`![After](${encodedAfter})\n`);
+                            commentParts.push(`</details>\n`);
+                        }
+                    }
+                    else if (encodedAfter) {
+                        // Only after exists - new slide
+                        commentParts.push("**New Slide Added**\n");
+                        commentParts.push(`![New Slide](${encodedAfter})\n`);
+                    }
+                    else if (encodedBefore) {
+                        // Only before exists - deleted slide
+                        commentParts.push("**Slide Deleted**\n");
+                        commentParts.push(`![Deleted Slide](${encodedBefore})\n`);
+                    }
                 }
-                else if (urls.after) {
-                    // Only after exists - new slide
-                    commentParts.push("**New Slide**\n");
-                    commentParts.push(`![New Slide](${urls.after})\n`);
-                }
-                else if (urls.before) {
-                    // Only before exists - deleted slide
-                    commentParts.push("**Deleted Slide**\n");
-                    commentParts.push(`![Deleted Slide](${urls.before})\n`);
-                }
+            }
+            catch (fileError) {
+                console.error(`Error processing file ${file}: ${fileError.message}`);
+                commentParts.push(`### Error processing slide ${file.split("/").pop()?.replace(".png", "") || ""}\n`);
+                commentParts.push(`Could not process this slide due to error: ${fileError.message}\n`);
             }
         }
     }
