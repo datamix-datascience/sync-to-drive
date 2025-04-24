@@ -132,4 +132,54 @@ Place `sync.json` in your repository root.
 3.  Edit source files (`src/**/*.ts`).
 4.  Build JS: `npm run build`.
 5.  Commit, push, tag release (`./release.sh vX.Y.Z`).
+
+## Slide Comparison Feature
+
+This action includes a functionality to visually compare Google Slides changes and automatically comment on PRs with the differences.
+
+### Key Features
+
+- Automatically compares visual diffs (PNG images) of Google Slides
+- Uses Gemini API to summarize changes between images in natural language
+- Identifies modified, new, and deleted slides
+- Posts a clear summary of changes as a comment on the PR
+
+### Configuration
+
+Configure the following parameters in your workflow YAML file:
+
+```yaml
+- uses: peopledot/sync-to-drive@main
+  with:
+    # Basic settings (omitted)...
+    
+    # Visual Diff settings
+    enable_visual_diffs: "true"
+    visual_diff_output_dir: "_diff_"
+    
+    # Slide comparison settings (new feature)
+    enable_slide_compare: "true"
+    gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+```
+
+### Required Settings
+
+1. `enable_visual_diffs`: Set to "true" (required as image generation is needed)
+2. `enable_slide_compare`: Set to "true" to enable the slide comparison feature
+3. `gemini_api_key`: API key for Gemini API usage (obtain from [Google AI Studio](https://makersuite.google.com/))
+
+### Example PR Comment
+
+Comments are automatically posted to PRs in the following format:
+
+```markdown
+# Visual Differences Summary
+
+## presentation--GoogleDriveID.slides
+
+### Slide 0001
+
+**Changes:**
+The slide title has been changed from "Old Title" to "New Title".
+The background color has changed from blue to green, and the bullet points have increased from 3 to 4 items.
 ```

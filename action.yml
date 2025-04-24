@@ -36,6 +36,14 @@ inputs:
     description: "Git user email for commits made by the action."
     required: false
     default: "github-actions[bot]@users.noreply.github.com"
+  # Slide Compare Inputs (Optional)
+  enable_slide_compare:
+    description: 'Set to "true" to enable Gemini-powered slide comparison comments on PRs.'
+    required: false
+    default: "false"
+  gemini_api_key:
+    description: "Google API Key for Gemini usage when comparing slides"
+    required: false
 
 runs:
   using: "node20"
