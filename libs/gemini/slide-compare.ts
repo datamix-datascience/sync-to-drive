@@ -142,7 +142,7 @@ export async function summarizeImageDiff(
 
   // Prepare the multimodal prompt
   const contents = createUserContent([
-    "以下の2つの画像の違いを要約してください。",
+    "1枚目はドキュメントの変更前、2枚目は変更後の画像です。どんな変更が加わったかを要約してください。",
     { inlineData: { mimeType: image1.mimeType, data: image1.data } },
     { inlineData: { mimeType: image2.mimeType, data: image2.data } },
   ]);
