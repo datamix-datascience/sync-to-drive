@@ -443,7 +443,27 @@ export async function generatePRComment(
   // Process each directory (slide deck)
   for (const [dir, files] of Object.entries(filesByDirectory)) {
     const slideName = dir.split("/").pop() || "";
-    commentParts.push(`## ${slideName}\n`);
+
+    // スライド名を整形する
+    let formattedSlideName = slideName;
+    let fileType = "";
+
+    // ファイル名と拡張子を分離（最初の「.」で分割）
+    const nameParts = slideName.split(".");
+    if (nameParts.length > 1) {
+      // 拡張子部分をファイルタイプとして使用
+      fileType = nameParts[nameParts.length - 1];
+
+      // 最初の部分を取得
+      formattedSlideName = nameParts[0];
+    }
+
+    // "--"で分割して前半部分を取得（IDを除去）
+    if (formattedSlideName.includes("--")) {
+      formattedSlideName = formattedSlideName.split("--")[0];
+    }
+
+    commentParts.push(`## [${fileType}] ${formattedSlideName}\n`);
 
     // Process each file (slide)
     for (const file of files) {
