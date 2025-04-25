@@ -469,7 +469,7 @@ export async function generatePRComment(
         const urls = await getBeforeAfterUrls(owner, repo, prNumber, file);
 
         if (urls && (urls.before || urls.after)) {
-          commentParts.push(`### Slide ${slidePage.replace(".png", "")}\n`);
+          commentParts.push(`### Page ${slidePage.replace(".png", "")}\n`);
 
           // URLにエンコードを適用
           const encodedBefore = urls.before
@@ -521,7 +521,7 @@ export async function generatePRComment(
             }
           } else if (encodedAfter) {
             // Only after exists - new slide
-            commentParts.push("**New Slide Added**\n");
+            commentParts.push("**New Page Added**\n");
 
             // 新規追加された画像の内容を要約する
             try {
@@ -541,18 +541,18 @@ export async function generatePRComment(
             }
           } else if (encodedBefore) {
             // Only before exists - deleted slide
-            commentParts.push("**Slide Deleted**\n");
+            commentParts.push("**Page Deleted**\n");
           }
         }
       } catch (fileError: any) {
         console.error(`Error processing file ${file}: ${fileError.message}`);
         commentParts.push(
-          `### Error processing slide ${
+          `### Error processing page ${
             file.split("/").pop()?.replace(".png", "") || ""
           }\n`
         );
         commentParts.push(
-          `Could not process this slide due to error: ${fileError.message}\n`
+          `Could not process this page due to error: ${fileError.message}\n`
         );
       }
     }
