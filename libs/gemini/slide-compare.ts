@@ -13,26 +13,26 @@ export async function fetchBase64(
   const maxRetries = 3;
   const retryDelay = 2000; // 2 seconds between retries
 
-  // 認証用ヘッダーを準備（プライベートリポジトリ対応）
+  // Prepare authentication headers (for private repositories)
   const headers: Record<string, string> = {};
   if (process.env.GITHUB_TOKEN) {
     console.log("Adding GitHub token for authenticated fetch");
-    // GitHub APIのベストプラクティスに合わせて認証ヘッダーを設定
+    // Set authentication header according to GitHub API best practices
     headers["Authorization"] = `Bearer ${process.env.GITHUB_TOKEN}`;
-    // GitHub APIからrawコンテンツを取得するためのAcceptヘッダーを追加
+    // Add Accept header to fetch raw content from GitHub API
     headers["Accept"] = "application/vnd.github.v3.raw";
   }
 
-  // raw.githubusercontent.com形式のURLをapi.github.com形式に変換
+  // Convert raw.githubusercontent.com URL format to api.github.com format
   let apiUrl = url;
   const rawGithubMatch = url.match(
     /https:\/\/raw\.githubusercontent\.com\/([^\/]+)\/([^\/]+)\/([^\/]+)\/(.+)/
   );
   if (rawGithubMatch) {
     const [, owner, repo, ref, path] = rawGithubMatch;
-    // パスからクエリパラメータを分離
+    // Separate query parameters from path
     let cleanPath = path;
-    // ?や%3Fで始まるクエリパラメータを削除
+    // Remove query parameters starting with ? or %3F
     if (cleanPath.includes("?")) {
       cleanPath = cleanPath.split("?")[0];
     }
@@ -71,17 +71,17 @@ export async function fetchBase64(
         throw new Error(errorMsg);
       }
 
-      // オリジナルのContent-Typeを取得
+      // Get the original Content-Type
       const originalContentType =
         res.headers.get("content-type") || "application/octet-stream";
 
-      // Gemini APIがサポートするMIMEタイプに変換
-      // GitHub APIからのapplication/vnd.github.v3.raw; charset=utf-8などの応答を変換
+      // Convert to MIME type supported by Gemini API
+      // Convert responses from GitHub API such as application/vnd.github.v3.raw; charset=utf-8
       let mimeType = originalContentType;
 
-      // GitHub APIの特殊なMIMEタイプを処理
+      // Handle special MIME types from GitHub API
       if (mimeType.includes("application/vnd.github.v3.raw")) {
-        // 画像ファイルのパス拡張子で判定
+        // Determine by image file path extension
         if (url.toLowerCase().endsWith(".png")) {
           mimeType = "image/png";
         } else if (url.toLowerCase().match(/\.(jpg|jpeg)$/)) {
@@ -89,12 +89,12 @@ export async function fetchBase64(
         } else if (url.toLowerCase().endsWith(".webp")) {
           mimeType = "image/webp";
         } else {
-          // デフォルトは画像ファイルと見なす
+          // Default to image/png
           mimeType = "image/png";
         }
       }
 
-      // charset部分を削除（Gemini APIが対応していないため）
+      // Remove charset part (not supported by Gemini API)
       if (mimeType.includes(";")) {
         mimeType = mimeType.split(";")[0].trim();
       }
@@ -142,7 +142,7 @@ export async function summarizeImageDiff(
 
   // Prepare the multimodal prompt
   const contents = createUserContent([
-    "1枚目の画像はドキュメントの変更前、2枚目の画像は変更後です。どんな変更が加わったかを要約してください。また、出力は英語と日本語の両方で行ってください。",
+    "The first image shows the document before changes, the second image shows after changes. Please summarize what changes were made. Please provide the output in both English and Japanese.",
     { inlineData: { mimeType: image1.mimeType, data: image1.data } },
     { inlineData: { mimeType: image2.mimeType, data: image2.data } },
   ]);
@@ -174,7 +174,7 @@ export async function summarizeNewImage(url: string): Promise<string> {
 
   // Prepare the multimodal prompt
   const contents = createUserContent([
-    "これは新規に追加されたドキュメントです。その内容を要約してください。また、出力は英語と日本語の両方で行ってください。",
+    "This is a newly added document. Please summarize its content. Please provide the output in both English and Japanese.",
     { inlineData: { mimeType: image.mimeType, data: image.data } },
   ]);
 
@@ -214,14 +214,14 @@ export async function getBeforeAfterUrls(
     const baseCommit = pr.base.sha;
     const headCommit = pr.head.sha;
 
-    // パスをURIコンポーネントに分割してエンコード
-    // '/path/to/file.png' → '/path/to/file.png'のように各セグメントをエンコード
+    // Split and encode path as URI components
+    // '/path/to/file.png' → encoding each segment like '/path/to/file.png'
     const encodedPath = filePath
       .split("/")
       .map((segment) => {
-        // すでにエンコードされている場合は二重エンコードを避ける
+        // Avoid double encoding if already encoded
         try {
-          // ?や%3Fで始まるクエリパラメータがある場合、それを除去
+          // Remove query parameters starting with ? or %3F
           let cleanSegment = segment;
           if (cleanSegment.includes("?")) {
             cleanSegment = cleanSegment.split("?")[0];
@@ -231,7 +231,7 @@ export async function getBeforeAfterUrls(
           }
           return encodeURIComponent(decodeURIComponent(cleanSegment));
         } catch (e) {
-          // ?や%3Fで始まるクエリパラメータがある場合、それを除去
+          // Remove query parameters starting with ? or %3F
           let cleanSegment = segment;
           if (cleanSegment.includes("?")) {
             cleanSegment = cleanSegment.split("?")[0];
@@ -255,18 +255,18 @@ export async function getBeforeAfterUrls(
     let afterDownloadUrl = "";
 
     try {
-      // ファイルの内容ではなく、メタデータを取得（より効率的）
+      // Get file metadata (more efficient than content)
       const { data: baseContent } = await octokit.repos.getContent({
         owner,
         repo,
-        path: filePath, // 元のパスを使用
+        path: filePath, // Using original path
         ref: baseCommit,
       });
 
-      // 複数ファイルが返ってきた場合は対象外
+      // Skip if multiple files are returned
       if (!Array.isArray(baseContent)) {
         beforeExists = true;
-        // ファイルのdirectダウンロードURLを取得
+        // Get direct download URL
         beforeDownloadUrl = baseContent.download_url || "";
         console.log(
           `File exists in base commit: ${baseCommit}, download URL: ${beforeDownloadUrl}`
@@ -279,18 +279,18 @@ export async function getBeforeAfterUrls(
     }
 
     try {
-      // ファイルの内容ではなく、メタデータを取得（より効率的）
+      // Get file metadata (more efficient than content)
       const { data: headContent } = await octokit.repos.getContent({
         owner,
         repo,
-        path: filePath, // 元のパスを使用
+        path: filePath, // Using original path
         ref: headCommit,
       });
 
-      // 複数ファイルが返ってきた場合は対象外
+      // Skip if multiple files are returned
       if (!Array.isArray(headContent)) {
         afterExists = true;
-        // ファイルのdirectダウンロードURLを取得
+        // Get direct download URL
         afterDownloadUrl = headContent.download_url || "";
         console.log(
           `File exists in head commit: ${headCommit}, download URL: ${afterDownloadUrl}`
@@ -307,8 +307,8 @@ export async function getBeforeAfterUrls(
       return null;
     }
 
-    // GitHub APIから直接提供されたダウンロードURLを使用（認証がそのまま有効）
-    // 直接URLが取得できなかった場合、API URLを使用
+    // Use download URLs directly provided by GitHub API (authentication remains valid)
+    // If direct URL not available, use API URL
     const baseUrl =
       beforeDownloadUrl ||
       `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath}?ref=${baseCommit}`;
@@ -444,21 +444,21 @@ export async function generatePRComment(
   for (const [dir, files] of Object.entries(filesByDirectory)) {
     const slideName = dir.split("/").pop() || "";
 
-    // スライド名を整形する
+    // Format slide name
     let formattedSlideName = slideName;
     let fileType = "";
 
-    // ファイル名と拡張子を分離（最初の「.」で分割）
+    // Split filename and extension (at first ".")
     const nameParts = slideName.split(".");
     if (nameParts.length > 1) {
-      // 拡張子部分をファイルタイプとして使用
+      // Use extension part as file type
       fileType = nameParts[nameParts.length - 1];
 
-      // 最初の部分を取得
+      // Get the first part
       formattedSlideName = nameParts[0];
     }
 
-    // "--"で分割して前半部分を取得（IDを除去）
+    // Split at "--" and get the first part (remove ID)
     if (formattedSlideName.includes("--")) {
       formattedSlideName = formattedSlideName.split("--")[0];
     }
@@ -469,11 +469,11 @@ export async function generatePRComment(
     for (const file of files) {
       try {
         const slidePage = file.split("/").pop() || "";
-        // エンコードされたファイルパスを使用する
+        // Use encoded file path
         const encodedFile = file
           .split("/")
           .map((segment) => {
-            // クエリパラメータがある場合は取り除く
+            // Remove query parameters if present
             let cleanSegment = segment;
             if (cleanSegment.includes("?")) {
               cleanSegment = cleanSegment.split("?")[0];
@@ -491,10 +491,10 @@ export async function generatePRComment(
         if (urls && (urls.before || urls.after)) {
           commentParts.push(`### Page ${slidePage.replace(".png", "")}\n`);
 
-          // URLにエンコードを適用
+          // Apply encoding to URLs
           const encodedBefore = urls.before
             ? urls.before.replace(/\/([^/]+)$/, (match, fileName) => {
-                // クエリパラメータがある場合は取り除く
+                // Remove query parameters if present
                 let cleanFileName = fileName;
                 if (cleanFileName.includes("?")) {
                   cleanFileName = cleanFileName.split("?")[0];
@@ -507,7 +507,7 @@ export async function generatePRComment(
             : "";
           const encodedAfter = urls.after
             ? urls.after.replace(/\/([^/]+)$/, (match, fileName) => {
-                // クエリパラメータがある場合は取り除く
+                // Remove query parameters if present
                 let cleanFileName = fileName;
                 if (cleanFileName.includes("?")) {
                   cleanFileName = cleanFileName.split("?")[0];
@@ -529,7 +529,7 @@ export async function generatePRComment(
               commentParts.push("**Changes:**\n");
               commentParts.push(diffSummary + "\n");
 
-              // 画像リンクを削除
+              // Removed image links
             } catch (compareError: any) {
               console.error(
                 `Failed to compare images: ${compareError.message}`
@@ -543,7 +543,7 @@ export async function generatePRComment(
             // Only after exists - new slide
             commentParts.push("**New Page Added**\n");
 
-            // 新規追加された画像の内容を要約する
+            // Summarize content of newly added image
             try {
               console.log(`Analyzing new image content for: ${file}`);
               const contentSummary = await summarizeNewImage(encodedAfter);
