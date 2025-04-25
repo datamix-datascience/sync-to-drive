@@ -142,7 +142,7 @@ export async function summarizeImageDiff(
 
   // Prepare the multimodal prompt
   const contents = createUserContent([
-    "1枚目はドキュメントの変更前、2枚目は変更後の画像です。どんな変更が加わったかを要約してください。",
+    "1枚目の画像はドキュメントの変更前、2枚目の画像は変更後です。どんな変更が加わったかを要約してください。また、出力は英語と日本語の両方で行ってください。",
     { inlineData: { mimeType: image1.mimeType, data: image1.data } },
     { inlineData: { mimeType: image2.mimeType, data: image2.data } },
   ]);
@@ -174,7 +174,7 @@ export async function summarizeNewImage(url: string): Promise<string> {
 
   // Prepare the multimodal prompt
   const contents = createUserContent([
-    "これは新規に追加されたドキュメントです。その内容を要約してください。",
+    "これは新規に追加されたドキュメントです。その内容を要約してください。また、出力は英語と日本語の両方で行ってください。",
     { inlineData: { mimeType: image.mimeType, data: image.data } },
   ]);
 
