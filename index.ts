@@ -6,9 +6,8 @@ import * as path from "path";
 // Lib Imports
 import { config } from "./libs/config.js"; // Load config first
 import {
-  generatePRComment,
   getChangedImageFiles,
-  postPRComment,
+  postSeparatedPRComments,
 } from "./libs/gemini/slide-compare.js";
 import { octokit } from "./libs/github/auth.js"; // Get initialized octokit
 import { credentials_json, drive } from "./libs/google-drive/auth.js"; // Needed for ownership check + drive client
@@ -864,21 +863,16 @@ async function sync_main() {
             core.info(
               `Found ${changedImageFiles.length} changed slide images to compare`
             );
-            // Generate PR comment with image comparison
-            const comment = await generatePRComment(
+
+            await postSeparatedPRComments(
               owner,
               repo,
               pr_details.pr_number,
               visual_diff_output_dir
             );
-
-            // Post comment to PR
-            if (comment !== "No image changes detected in this PR.") {
-              await postPRComment(owner, repo, pr_details.pr_number, comment);
-              core.info("Posted slide comparison comment to PR");
-            } else {
-              core.info("No slide changes detected to comment on");
-            }
+            core.info(
+              "Posted separated English and Japanese slide comparison comments to PR"
+            );
           } else {
             core.info("No slide image changes detected for comparison");
           }
