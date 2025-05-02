@@ -136,7 +136,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             let expected_svg_path = null;
             if (is_google_slide && expected_link_path) {
                 // Derive SVG path from link path
-                expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.slides.svg');
+                expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.svg');
             }
             // Add expected *local* files to the map
             if (!is_google_doc) { // Content file expected for non-Google Docs
@@ -282,7 +282,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 const expected_link_path = drive_dir === '.'
                     ? construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)
                     : path.join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)).replace(/\\/g, '/');
-                const expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.slides.svg');
+                const expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.svg');
                 const expected_svg_info = expected_local_files.get(expected_svg_path);
                 // Ensure the mapping points back to the *current* drive_item ID
                 if (expected_svg_info && expected_svg_info.driveItem.id === drive_item.id) {
