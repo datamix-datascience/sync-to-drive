@@ -136,7 +136,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             let expected_svg_path = null;
             if (is_google_slide && expected_link_path) {
                 // Derive SVG path from link path
-                expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.svg');
+                expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.export.svg');
             }
             // Add expected *local* files to the map
             if (!is_google_doc) { // Content file expected for non-Google Docs
@@ -282,7 +282,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 const expected_link_path = drive_dir === '.'
                     ? construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)
                     : path.join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)).replace(/\\/g, '/');
-                const expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.svg');
+                const expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.export.svg');
                 const expected_svg_info = expected_local_files.get(expected_svg_path);
                 // Ensure the mapping points back to the *current* drive_item ID
                 if (expected_svg_info && expected_svg_info.driveItem.id === drive_item.id) {
@@ -446,7 +446,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                                 const link_file_name = construct_link_file_name(base_name, driveItem.id, driveItem.mimeType);
                                 const content_dir = path.dirname(targetContentPath); // Directory relative to repo root
                                 // Derive SVG filename from link filename
-                                const svg_filename = link_file_name.replace(/\.gdrive\.json$/i, '.slides.svg');
+                                const svg_filename = link_file_name.replace(/\.gdrive\.json$/i, '.export.svg');
                                 const output_svg_path = path.join(content_dir, svg_filename); // Full path in local repo
                                 // 4. Write SVG file
                                 const write_success = await write_svg_file(svg_string, output_svg_path);
