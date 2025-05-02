@@ -12,6 +12,9 @@ catch (error) {
     core.setFailed("Failed to parse credentials JSON: " + error.message);
     throw new Error("Credentials parsing failed"); // Re-throw
 }
-const auth = new google.auth.JWT(credentials_json.client_email, undefined, credentials_json.private_key, ["https://www.googleapis.com/auth/drive"]);
+const auth = new google.auth.JWT(credentials_json.client_email, undefined, credentials_json.private_key, [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/presentations.readonly",
+]);
 const drive = google.drive({ version: "v3", auth });
 export { drive, credentials_json, auth };

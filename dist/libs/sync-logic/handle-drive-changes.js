@@ -7,9 +7,13 @@ import { list_drive_files_recursively } from "../google-drive/list.js";
 import { handle_download_item } from "../google-drive/files.js";
 import { create_pull_request_with_retry } from "../github/pull-requests.js";
 import { octokit } from "../github/auth.js";
-// Import construct_link_file_name, remove get_link_file_suffix if no longer needed elsewhere
+// Import auth object needed for Slides API call
+import { auth as driveAuthClient } from "../google-drive/auth.js"; // Rename import to avoid clash
 import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES, construct_link_file_name } from "../google-drive/file_types.js";
 import { format_pr_body } from "./pretty.js";
+// Import Slides fetching and SVG conversion functions
+import { fetch_google_slide_json } from "../google-slides/fetch.js";
+import { generate_slide_svg, write_svg_file } from "../google-slides/slides_to_svg.js";
 // Helper to safely get repo owner and name
 function get_repo_info() {
     const repo_full_name = process.env.GITHUB_REPOSITORY;
@@ -103,7 +107,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         // --- Step 4: Determine Expected Local State & Identify Changes ---
         core.startGroup('Determining Expected State and Changes');
         // Map of expected *local* relative paths to the DriveItem causing them
-        const expected_local_files = new Map();
+        const expected_local_files = new Map(); // Added 'svg' type
         // Store DriveItems that require a file system operation (add/update)
         const drive_items_needing_processing = new Map();
         // Populate expected_local_files based on the drive_files_with_paths array
@@ -114,6 +118,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             }
             // Removed duplicate detection logic
             const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType);
+            const is_google_slide = drive_item.mimeType === 'application/vnd.google-apps.presentation';
             const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType);
             // 1. Determine Expected Content Path (usually the drive_path, represents the binary/downloadable version if applicable)
             const expected_content_path = drive_path; // Use the path calculated during listing
@@ -127,6 +132,12 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 // Calculate the link file path relative to the root
                 expected_link_path = drive_dir === '.' ? link_filename : path.join(drive_dir, link_filename).replace(/\\/g, '/');
             }
+            // 3. Determine Expected SVG path (if it's a Google Slide)
+            let expected_svg_path = null;
+            if (is_google_slide && expected_link_path) {
+                // Derive SVG path from link path
+                expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.slides.svg');
+            }
             // Add expected *local* files to the map
             if (!is_google_doc) { // Content file expected for non-Google Docs
                 if (expected_local_files.has(expected_content_path)) {
@@ -135,7 +146,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 }
                 expected_local_files.set(expected_content_path, { type: 'content', driveItem: drive_item });
             }
-            if (expected_link_path) { // Link file expected for Google Docs and PDFs
+            if (expected_link_path) { // Link file expected for Google Docs and PDFs (and Slides)
                 if (expected_local_files.has(expected_link_path)) {
                     // This should theoretically NOT happen anymore due to unique file IDs in names
                     core.error(`FATAL: Duplicate link path mapping detected even with file ID in name: ${expected_link_path}. Existing ID: ${expected_local_files.get(expected_link_path)?.driveItem.id}, New ID: ${drive_item.id}. This indicates a logic error.`);
@@ -143,8 +154,15 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 }
                 expected_local_files.set(expected_link_path, { type: 'link', driveItem: drive_item });
             }
+            if (expected_svg_path) { // SVG file expected for Google Slides
+                if (expected_local_files.has(expected_svg_path)) {
+                    // Also should not happen due to unique ID in name derivation
+                    core.error(`FATAL: Duplicate SVG path mapping detected: ${expected_svg_path}. Existing ID: ${expected_local_files.get(expected_svg_path)?.driveItem.id}, New ID: ${drive_item.id}.`);
+                }
+                expected_local_files.set(expected_svg_path, { type: 'svg', driveItem: drive_item });
+            }
         }
-        core.info(`Calculated ${expected_local_files.size} expected local files based on Drive state.`);
+        core.info(`Calculated ${expected_local_files.size} expected local files (content, links, svgs) based on Drive state.`);
         // Removed duplicate warning log
         // Compare expected state against initial local state to find changes
         // Iterate through the Drive items AGAIN to ensure each one is checked
@@ -152,6 +170,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             if (!drive_item.id || !drive_item.name || !drive_item.mimeType)
                 continue; // Skip incomplete items
             const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType);
+            const is_google_slide = drive_item.mimeType === 'application/vnd.google-apps.presentation';
             const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType);
             let item_needs_update = false; // Flag if *this specific* drive item triggers an update
             let update_reasons = [];
@@ -255,7 +274,67 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                     }
                 }
             }
-            // C. Add to processing list if *this* Drive item triggered an update
+            // C. Check expected SVG file (if applicable - Google Slides)
+            if (is_google_slide) {
+                // Calculate the EXPECTED SVG path based on the link path calculation
+                const base_name = drive_item.name;
+                const drive_dir = path.dirname(drive_path);
+                const expected_link_path = drive_dir === '.'
+                    ? construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)
+                    : path.join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)).replace(/\\/g, '/');
+                const expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.slides.svg');
+                const expected_svg_info = expected_local_files.get(expected_svg_path);
+                // Ensure the mapping points back to the *current* drive_item ID
+                if (expected_svg_info && expected_svg_info.driveItem.id === drive_item.id) {
+                    const local_svg_info = initial_local_map.get(expected_svg_path);
+                    let needs_update = false;
+                    let reason = "";
+                    // Check if SVG is missing locally
+                    if (!local_svg_info) {
+                        needs_update = true;
+                        reason = "SVG file missing locally";
+                    }
+                    else {
+                        // Check if the corresponding *link file* indicates a modified time change,
+                        // as we don't have a hash for the SVG itself.
+                        const corresponding_link_expected = expected_local_files.get(expected_link_path);
+                        if (corresponding_link_expected?.type === 'link' && corresponding_link_expected.driveItem.id === drive_item.id) {
+                            const local_link_info = initial_local_map.get(expected_link_path);
+                            if (!local_link_info) {
+                                needs_update = true;
+                                reason = "Corresponding link file missing locally (for timestamp check)";
+                            }
+                            else {
+                                try {
+                                    const link_content = await fs_promises.readFile(local_link_info.path, "utf-8");
+                                    const link_data = JSON.parse(link_content);
+                                    if (link_data.modifiedTime !== drive_item.modifiedTime) {
+                                        needs_update = true;
+                                        reason = `SVG update triggered by ModifiedTime mismatch in link file`;
+                                    }
+                                }
+                                catch {
+                                    needs_update = true;
+                                    reason = `Cannot read link file for SVG timestamp check`;
+                                }
+                            }
+                        }
+                        else {
+                            core.debug(`Could not find corresponding link file (${expected_link_path}) to check modifiedTime for SVG (${expected_svg_path}). Assuming update needed if link changed.`);
+                            // If the link file itself needed an update (checked in block B), that's enough reason to update the SVG too.
+                            if (update_reasons.some(r => r.startsWith(`Link file '${expected_link_path}'`))) {
+                                needs_update = true;
+                                reason = `SVG update triggered by corresponding link file change`;
+                            }
+                        }
+                    }
+                    if (needs_update) {
+                        item_needs_update = true;
+                        update_reasons.push(`SVG file '${expected_svg_path}': ${reason}`);
+                    }
+                }
+            }
+            // D. Add to processing list if *this* Drive item triggered an update
             if (item_needs_update) {
                 core.info(` -> Change detected for Drive item: ${drive_item.name} (ID: ${drive_item.id}, Path: ${drive_path}). Reasons: ${update_reasons.join('; ')}`);
                 // Target path for handle_download_item is the *conceptual* content path based on Drive structure
@@ -351,7 +430,36 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 core.info(`   - Processing Drive item: ${driveItem.name || `(ID: ${driveItem.id})`} -> Target local content path: ${targetContentPath}`);
                 try {
                     await handle_download_item(driveItem, targetContentPath);
-                    changes_applied = true;
+                    changes_applied = true; // Assume change if download attempted
+                    // *** NEW: SVG Generation for Google Slides ***
+                    if (driveItem.mimeType === 'application/vnd.google-apps.presentation') {
+                        core.info(`   -> Item is Google Slides. Attempting SVG generation...`);
+                        // 1. Fetch Slides JSON content using the specific function and auth client
+                        const presentation_json = await fetch_google_slide_json(driveAuthClient, driveItem.id);
+                        if (presentation_json) {
+                            // 2. Convert JSON to SVG
+                            const svg_string = await generate_slide_svg(presentation_json);
+                            if (svg_string) {
+                                // 3. Determine SVG output path
+                                //    Get the link file path that *would* be created (or was just created)
+                                const base_name = driveItem.name;
+                                const link_file_name = construct_link_file_name(base_name, driveItem.id, driveItem.mimeType);
+                                const content_dir = path.dirname(targetContentPath); // Directory relative to repo root
+                                // Derive SVG filename from link filename
+                                const svg_filename = link_file_name.replace(/\.gdrive\.json$/i, '.slides.svg');
+                                const output_svg_path = path.join(content_dir, svg_filename); // Full path in local repo
+                                // 4. Write SVG file
+                                const write_success = await write_svg_file(svg_string, output_svg_path);
+                                if (write_success) {
+                                    core.info(`   -> Successfully generated and saved SVG for ${driveItem.name} at ${output_svg_path}`);
+                                    // Ensure change is tracked even if only SVG was generated/updated
+                                    changes_applied = true;
+                                    // Note: The SVG file will be picked up by the `git add .` later.
+                                }
+                            }
+                        }
+                    }
+                    // *** END: SVG Generation ***
                 }
                 catch (error) {
                     core.error(`   - Failed to process item from Drive ${driveItem.name || `(ID: ${driveItem.id})`} to ${targetContentPath}: ${error.message}`);
@@ -376,6 +484,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         await execute_git("add", ["-u"]);
         // *** ADDED DEBUGGING ***
         core.info("Checking Git status *after* staging:");
+        await execute_git("status", [], { silent: false }); // Display full status
         // *** END ADDED DEBUGGING ***
         const status_result = await execute_git('status', ['--porcelain']);
         // Log status output regardless of whether it's empty, for debugging

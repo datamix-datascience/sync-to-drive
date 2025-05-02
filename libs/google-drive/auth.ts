@@ -17,7 +17,10 @@ const auth = new google.auth.JWT(
   credentials_json.client_email,
   undefined,
   credentials_json.private_key,
-  ["https://www.googleapis.com/auth/drive"]
+  [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/presentations.readonly",
+  ]
 );
 
 const drive = google.drive({ version: "v3", auth });
