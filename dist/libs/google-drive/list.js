@@ -3,7 +3,7 @@ import { drive, credentials_json } from "./auth.js";
 import * as path from "path";
 // List Drive Files Recursively
 export async function list_drive_files_recursively(folder_id, base_path = "") {
-    let all_files_with_paths = []; // <--- Changed to Array
+    let all_files_with_paths = [];
     const folder_map = new Map();
     let all_items = [];
     let next_page_token;

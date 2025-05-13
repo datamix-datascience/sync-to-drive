@@ -14,10 +14,10 @@ export async function list_drive_files_recursively(
   folder_id: string,
   base_path: string = ""
 ): Promise<{
-  files: DriveFileWithPath[]; // <--- Changed to Array
+  files: DriveFileWithPath[];
   folders: Map<string, DriveItem>;
 }> {
-  let all_files_with_paths: DriveFileWithPath[] = []; // <--- Changed to Array
+  let all_files_with_paths: DriveFileWithPath[] = [];
   const folder_map = new Map<string, DriveItem>();
   let all_items: DriveFile[] = [];
   let next_page_token: string | undefined;
