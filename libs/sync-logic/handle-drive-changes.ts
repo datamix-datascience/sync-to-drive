@@ -168,8 +168,9 @@ export async function handle_drive_changes(
       // 3. Determine Expected SVG path (if it's a Google Slide)
       let expected_svg_path: string | null = null;
       if (is_google_slide && expected_link_path) {
-        // Derive SVG path from link path
-        expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.export.svg');
+        // Derive SVG path from link path, then prepend _diff_ directory
+        const relative_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.export.svg');
+        expected_svg_path = path.join('_diff_', relative_svg_path).replace(/\\/g, '/');
       }
 
       // Add expected *local* files to the map
@@ -298,13 +299,17 @@ export async function handle_drive_changes(
 
       // C. Check expected SVG file (if applicable - Google Slides)
       if (is_google_slide) {
-        // Calculate the EXPECTED SVG path based on the link path calculation
+        // Calculate the path of the *actual link file* (e.g., "Slides/My Presentation.gdrive.json")
+        // This is used to check the modifiedTime for the slide.
         const base_name = drive_item.name;
-        const drive_dir = path.dirname(drive_path);
-        const expected_link_path = drive_dir === '.'
+        const drive_dir = path.dirname(drive_path); // Directory of the original Drive item (e.g., "Slides")
+        const actual_link_file_path = drive_dir === '.'
           ? construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)
           : path.join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)).replace(/\\/g, '/');
-        const expected_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.export.svg');
+
+        // Calculate the EXPECTED SVG path (e.g., "_diff_/Slides/My Presentation.export.svg")
+        const relative_svg_filename = actual_link_file_path.replace(/\.gdrive\.json$/i, '.export.svg');
+        const expected_svg_path = path.join('_diff_', relative_svg_filename).replace(/\\/g, '/');
 
         const expected_svg_info = expected_local_files.get(expected_svg_path);
         // Ensure the mapping points back to the *current* drive_item ID
@@ -318,9 +323,9 @@ export async function handle_drive_changes(
             } else {
                 // Check if the corresponding *link file* indicates a modified time change,
                 // as we don't have a hash for the SVG itself.
-                const corresponding_link_expected = expected_local_files.get(expected_link_path);
+                const corresponding_link_expected = expected_local_files.get(actual_link_file_path);
                 if (corresponding_link_expected?.type === 'link' && corresponding_link_expected.driveItem.id === drive_item.id) {
-                    const local_link_info = initial_local_map.get(expected_link_path);
+                    const local_link_info = initial_local_map.get(actual_link_file_path);
                     if (!local_link_info) {
                         needs_update = true; reason = "Corresponding link file missing locally (for timestamp check)";
                     } else {
@@ -333,9 +338,9 @@ export async function handle_drive_changes(
                         } catch { needs_update = true; reason = `Cannot read link file for SVG timestamp check`; }
                     }
                 } else {
-                    core.debug(`Could not find corresponding link file (${expected_link_path}) to check modifiedTime for SVG (${expected_svg_path}). Assuming update needed if link changed.`);
+                    core.debug(`Could not find corresponding link file (${actual_link_file_path}) to check modifiedTime for SVG (${expected_svg_path}). Assuming update needed if link changed.`);
                     // If the link file itself needed an update (checked in block B), that's enough reason to update the SVG too.
-                    if (update_reasons.some(r => r.startsWith(`Link file '${expected_link_path}'`))) {
+                    if (update_reasons.some(r => r.startsWith(`Link file '${actual_link_file_path}'`))) {
                       needs_update = true; reason = `SVG update triggered by corresponding link file change`;
                     }
                 }
@@ -459,15 +464,22 @@ export async function handle_drive_changes(
               const svg_string = await generate_slide_svg(presentation_json);
               if (svg_string) {
                 // 3. Determine SVG output path
-                //    Get the link file path that *would* be created (or was just created)
-                const base_name = driveItem.name;
-                const link_file_name = construct_link_file_name(base_name, driveItem.id, driveItem.mimeType);
-                const content_dir = path.dirname(targetContentPath); // Directory relative to repo root
-                // Derive SVG filename from link filename
-                const svg_filename = link_file_name.replace(/\.gdrive\.json$/i, '.export.svg');
-                const output_svg_path = path.join(content_dir, svg_filename); // Full path in local repo
+                //    targetContentPath is like "SubDir/MyPresentation" (no extension, from Drive structure)
+                const base_name = driveItem.name; // "MyPresentation"
+                const link_file_base_name = construct_link_file_name(base_name, driveItem.id, driveItem.mimeType); // "MyPresentation_id.gslides.gdrive.json"
+                const svg_file_base_name = link_file_base_name.replace(/\.gdrive\.json$/i, '.export.svg'); // "MyPresentation_id.gslides.export.svg"
 
-                // 4. Write SVG file
+                // Get the directory of the original item, relative to the sync root (e.g., "SubDir" or ".")
+                const relative_item_dir = path.dirname(targetContentPath);
+
+                // Construct the final path within the _diff_ folder
+                // If relative_item_dir is ".", path.join will correctly place svg_file_base_name directly under _diff_
+                const output_svg_path = path.join('_diff_', relative_item_dir, svg_file_base_name).replace(/\\/g, '/');
+
+                // 4. Ensure directory exists and Write SVG file
+                const output_svg_dir = path.dirname(output_svg_path);
+                await fs_promises.mkdir(output_svg_dir, { recursive: true }); // Ensures _diff_ and any subdirectories are created
+
                 const write_success = await write_svg_file(svg_string, output_svg_path);
                 if (write_success) {
                    core.info(`   -> Successfully generated and saved SVG for ${driveItem.name} at ${output_svg_path}`);
