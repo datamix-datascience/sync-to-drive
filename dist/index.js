@@ -208,7 +208,7 @@ async function sync_main() {
                 for (const [local_relative_path, local_file] of current_local_map) {
                     // Push an async function to the promises array
                     uploadPromises.push((async () => {
-                        if (local_relative_path.endsWith('.exported.json')) {
+                        if (local_relative_path.endsWith('.gdrive.json')) {
                             core.debug(` -> Skipping exported JSON file: ${local_relative_path}`);
                             return; // Skip upload/processing for this file type
                         }
