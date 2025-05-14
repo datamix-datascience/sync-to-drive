@@ -143,25 +143,31 @@ export async function upload_file(
       } else {
         core.info(`Updating existing file content '${local_file_name}' (ID: ${fileId}) in folder ${target_folder_id}`);
       }
-      const res = await drive.files.update({
+      core.debug(`Updating existing file. File ID: ${fileId}, Target Folder ID: ${target_folder_id}, New Name (if changed): ${requestBody.name}`);
+      core.debug(`Update Request Params: fileId=${fileId}, media=PRESENT, requestBody=${JSON.stringify(requestBody)}, fields="id, name, md5Checksum", supportsAllDrives=true`);
+      const resUpdate = await drive.files.update({
         fileId: fileId,
         media: media,
         // Only include requestBody if it has keys (i.e., name change)
         requestBody: Object.keys(requestBody).length > 0 ? requestBody : undefined,
         fields: "id, name, md5Checksum", // Always request fields
+        supportsAllDrives: true,
       });
-      fileId = res.data.id!;
-      core.info(`Updated file '${res.data.name}' (ID: ${fileId}). New hash: ${res.data.md5Checksum || 'N/A'}`);
+      fileId = resUpdate.data.id!;
+      core.info(`Updated file '${resUpdate.data.name}' (ID: ${fileId}). New hash: ${resUpdate.data.md5Checksum || 'N/A'}`);
     } else { // create
       core.info(`Creating new file '${local_file_name}' in folder ${target_folder_id}`);
-      const res = await drive.files.create({
-        requestBody: { name: local_file_name, parents: [target_folder_id] },
+      const createRequestBody = { name: local_file_name, parents: [target_folder_id] };
+      core.debug(`Create Request Params: media=PRESENT, requestBody=${JSON.stringify(createRequestBody)}, fields="id, name, md5Checksum", supportsAllDrives=true`);
+      const resCreate = await drive.files.create({
+        requestBody: createRequestBody,
         media: media,
         fields: "id, name, md5Checksum",
+        supportsAllDrives: true,
       });
-      if (!res.data.id) { throw new Error(`File creation API call did not return an ID for '${local_file_name}'.`); }
-      fileId = res.data.id;
-      core.info(`Uploaded file '${res.data.name}' (ID: ${fileId}). Hash: ${res.data.md5Checksum || 'N/A'}`);
+      if (!resCreate.data.id) { throw new Error(`File creation API call did not return an ID for '${local_file_name}'.`); }
+      fileId = resCreate.data.id;
+      core.info(`Uploaded file '${resCreate.data.name}' (ID: ${fileId}). Hash: ${resCreate.data.md5Checksum || 'N/A'}`);
     }
     return { id: fileId!, success: true };
   } catch (error: unknown) {
