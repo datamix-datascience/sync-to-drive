@@ -77,9 +77,9 @@ export async function fetch_drive_file_as_pdf(
     } else if (mime_type === NATIVE_PDF_TYPE) {
       // --- Direct Download Path (Native PDF) ---
       core.info(`   - Downloading native PDF file directly...`);
-      core.debug(`     Attempting drive.files.get({ fileId: '${file_id}', alt: 'media' })`);
+      core.debug(`     Attempting drive.files.get({ fileId: '${file_id}', alt: 'media', supportsAllDrives: true })`);
       const response = await drive.files.get(
-        { fileId: file_id, alt: 'media' },
+        { fileId: file_id, alt: 'media', supportsAllDrives: true },
         { responseType: 'stream' }
       );
       if (is_readable_stream(response.data)) {
@@ -96,7 +96,7 @@ export async function fetch_drive_file_as_pdf(
 
       try {
         // Step 1: Copy and Convert
-        core.debug(`     Attempting drive.files.copy({ fileId: '${file_id}', requestBody: { mimeType: '${target_native_mime_type}' } })`);
+        core.debug(`     Attempting drive.files.copy({ fileId: '${file_id}', requestBody: { mimeType: '${target_native_mime_type}' }, supportsAllDrives: true })`);
         const copy_response = await drive.files.copy({
           fileId: file_id,
           requestBody: {
@@ -105,6 +105,7 @@ export async function fetch_drive_file_as_pdf(
             mimeType: target_native_mime_type,
           },
           fields: 'id, name', // Request ID and name of the new file
+          supportsAllDrives: true,
         });
 
         temp_native_file_id = copy_response.data.id || null;
@@ -211,7 +212,7 @@ export async function fetch_drive_file_as_pdf(
     if (temp_native_file_id) {
       core.info(`   - Cleaning up temporary native file: ID ${temp_native_file_id}`);
       try {
-        await drive.files.delete({ fileId: temp_native_file_id });
+        await drive.files.delete({ fileId: temp_native_file_id, supportsAllDrives: true });
         core.info(`   - Successfully deleted temporary native file ${temp_native_file_id}.`);
       } catch (delete_error) {
         core.warning(`   - Failed to delete temporary native file ${temp_native_file_id}: ${(delete_error as Error).message}`);
