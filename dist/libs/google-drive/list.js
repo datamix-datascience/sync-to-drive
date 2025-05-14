@@ -14,6 +14,8 @@ export async function list_drive_files_recursively(folder_id, base_path = "") {
                 q: `'${folder_id}' in parents and trashed = false`,
                 fields: "nextPageToken, files(id, name, mimeType, md5Checksum, modifiedTime, owners(emailAddress), webViewLink)", // Keep webViewLink
                 spaces: "drive",
+                includeItemsFromAllDrives: true,
+                supportsAllDrives: true,
                 pageToken: next_page_token,
                 pageSize: 1000,
             });
