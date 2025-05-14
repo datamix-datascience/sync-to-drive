@@ -212,10 +212,14 @@ export async function fetch_drive_file_as_pdf(
     if (temp_native_file_id) {
       core.info(`   - Cleaning up temporary native file: ID ${temp_native_file_id}`);
       try {
-        await drive.files.delete({ fileId: temp_native_file_id, supportsAllDrives: true });
-        core.info(`   - Successfully deleted temporary native file ${temp_native_file_id}.`);
+        await drive.files.update({
+          fileId: temp_native_file_id,
+          requestBody: { trashed: true },
+          supportsAllDrives: true, // Keep this for consistency
+        });
+        core.info(`   - Successfully moved temporary native file ${temp_native_file_id} to trash.`);
       } catch (delete_error) {
-        core.warning(`   - Failed to delete temporary native file ${temp_native_file_id}: ${(delete_error as Error).message}`);
+        core.warning(`   - Failed to move temporary native file ${temp_native_file_id} to trash: ${(delete_error as Error).message}`);
         // Log details if helpful
         const deleteGaxiosError = delete_error as { response?: { data?: any } };
         if (deleteGaxiosError.response?.data) {
