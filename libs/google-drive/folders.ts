@@ -15,6 +15,8 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
       fields: "files(id, name)",
       spaces: "drive",
       pageSize: 1,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
     }) as { data: DriveFilesListResponse };
     core.debug(`API response for existing folder query '${folder_name}' under '${parent_id}': ${JSON.stringify(res.data)}`);
     const existing_folder = res.data.files?.[0];
@@ -32,6 +34,7 @@ async function ensure_folder(parent_id: string, folder_name: string): Promise<st
         parents: [parent_id],
       },
       fields: "id",
+      supportsAllDrives: true,
     });
     if (!folder.data.id) {
       throw new Error(`Folder creation API call did not return an ID for '${folder_name}'.`);

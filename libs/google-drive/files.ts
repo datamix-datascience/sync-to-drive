@@ -76,7 +76,7 @@ export async function handle_download_item(
 
       core.debug(`Downloading Drive file content ID ${drive_item.id} to local path ${target_content_local_path}`);
       const response = await drive.files.get(
-        { fileId: drive_item.id, alt: "media" },
+        { fileId: drive_item.id, alt: "media", supportsAllDrives: true, },
         { responseType: "stream" }
       );
       const dest = fs.createWriteStream(target_content_local_path);

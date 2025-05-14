@@ -59,9 +59,11 @@ export async function list_drive_files_recursively(
 
     let permissions: DrivePermission[] = [];
     try {
+      core.debug(`Listing permissions for item ${item.id} ('${item.name}') with supportsAllDrives: true`);
       const perm_res = await drive.permissions.list({
         fileId: item.id,
         fields: "permissions(id, role, emailAddress, pendingOwner)",
+        supportsAllDrives: true,
       }) as { data: DrivePermissionsListResponse };
       permissions = perm_res.data.permissions || [];
     } catch (permError) {
