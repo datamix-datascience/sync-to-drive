@@ -83,7 +83,20 @@ export async function handle_drive_changes(
   git_user_name: string,
   git_user_email: string
 ): Promise<HandleDriveChangesResult> {
-  core.info(`Handling potential incoming changes from Drive folder: ${folder_id}`);
+  core.info(`Handling potential incoming changes from Drive folder: ${folder_id} for trigger event: ${trigger_event_name}`);
+
+  // If the event is 'push', Git is the source of truth.
+  // This function synchronizes Drive changes TO Git.
+  // So, for a 'push' event, this function should not perform its usual operations.
+  if (trigger_event_name === 'push') {
+    core.info("Detected 'push' event. Git is the source of truth.");
+    core.info("Skipping Drive-to-Git synchronization logic in 'handle_drive_changes'.");
+    // A different function/logic would be needed for Git-to-Drive synchronization.
+    return {}; // Return an empty result, indicating no PR was made by this function.
+  }
+
+  // Original logic for 'schedule', 'workflow_dispatch', etc., where Drive is the source of truth.
+  core.info(`Proceeding with Drive-to-Git synchronization for event '${trigger_event_name}'.`);
 
   let original_state_branch: string = '';
   const repo_info = get_repo_info();
