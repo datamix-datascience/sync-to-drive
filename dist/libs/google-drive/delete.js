@@ -8,6 +8,7 @@ export async function delete_untracked(id, name, is_folder = false) {
         await drive.files.update({
             fileId: id,
             requestBody: { trashed: true },
+            supportsAllDrives: true,
             // Add fields to potentially get confirmation, although not strictly necessary
             // fields: "id, name, trashed"
         });

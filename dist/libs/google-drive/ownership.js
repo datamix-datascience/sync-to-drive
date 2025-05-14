@@ -52,7 +52,7 @@ export async function accept_ownership_transfers(file_id) {
         }
         // --- 4. Check children recursively ONLY if the current item is a folder ---
         core.debug(`Checking if item ${file_id} is a folder for recursive ownership check...`);
-        const file_meta = await drive.files.get({ fileId: file_id, fields: 'id, name, mimeType' });
+        const file_meta = await drive.files.get({ fileId: file_id, fields: 'id, name, mimeType', supportsAllDrives: true });
         if (file_meta.data.mimeType === 'application/vnd.google-apps.folder') {
             core.debug(`Item '${file_meta.data.name}' (${file_id}) is a folder. Checking its children.`);
             let children_page_token;
@@ -62,6 +62,8 @@ export async function accept_ownership_transfers(file_id) {
                     fields: "nextPageToken, files(id, name, mimeType)", // Only need ID and type
                     pageToken: children_page_token,
                     pageSize: 500, // Process children in batches
+                    includeItemsFromAllDrives: true,
+                    supportsAllDrives: true,
                 });
                 for (const child of children_res.data.files || []) {
                     if (child.id) {

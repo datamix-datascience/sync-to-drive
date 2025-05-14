@@ -60,7 +60,7 @@ export async function handle_download_item(drive_item, target_content_local_path
             const content_dir = path.dirname(target_content_local_path);
             await fs.promises.mkdir(content_dir, { recursive: true });
             core.debug(`Downloading Drive file content ID ${drive_item.id} to local path ${target_content_local_path}`);
-            const response = await drive.files.get({ fileId: drive_item.id, alt: "media" }, { responseType: "stream" });
+            const response = await drive.files.get({ fileId: drive_item.id, alt: "media", supportsAllDrives: true, }, { responseType: "stream" });
             const dest = fs.createWriteStream(target_content_local_path);
             await new Promise((resolve, reject) => {
                 if (!response.data || typeof response.data.pipe !== 'function') {

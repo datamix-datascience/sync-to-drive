@@ -306,6 +306,7 @@ async function sync_main() {
                                             fileId: existing_drive_file.id,
                                             requestBody: { name: drive_target_name },
                                             fields: "id,name",
+                                            supportsAllDrives: true,
                                         });
                                     }
                                     else {
@@ -331,6 +332,7 @@ async function sync_main() {
                                             fileId: existing_drive_file.id,
                                             requestBody: { name: drive_target_name },
                                             fields: "id,name",
+                                            supportsAllDrives: true,
                                         });
                                     }
                                     else {

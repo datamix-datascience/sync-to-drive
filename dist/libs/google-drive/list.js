@@ -40,9 +40,11 @@ export async function list_drive_files_recursively(folder_id, base_path = "") {
         const owned = item.owners?.some(owner => owner.emailAddress === service_account_email) || false;
         let permissions = [];
         try {
+            core.debug(`Listing permissions for item ${item.id} ('${item.name}') with supportsAllDrives: true`);
             const perm_res = await drive.permissions.list({
                 fileId: item.id,
                 fields: "permissions(id, role, emailAddress, pendingOwner)",
+                supportsAllDrives: true,
             });
             permissions = perm_res.data.permissions || [];
         }
