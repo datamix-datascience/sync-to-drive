@@ -1,4 +1,4 @@
-import { GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES, NATIVE_PDF_TYPE } from "../visual-diffs/types.js";
+import { GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES, NATIVE_PDF_TYPE, } from "../visual-diffs/types.js";
 export const GOOGLE_DOC_MIME_TYPES = [
     "application/vnd.google-apps.document",
     "application/vnd.google-apps.spreadsheet",
@@ -10,7 +10,30 @@ export const GOOGLE_DOC_MIME_TYPES = [
     "application/vnd.google-apps.fusiontable",
     "application/vnd.google-apps.site",
     "application/vnd.google-apps.map",
-    "application/vnd.google-apps.vid",
+    "application/vnd.google-apps.vid", // Google Vids (link-only)
+    "application/vnd.google-apps.video", // Generic Google Video (link-only)
+    // Common Video Types (link-only)
+    "video/mp4",
+    "video/mpeg",
+    "video/quicktime", // .mov
+    "video/webm",
+    "video/x-msvideo", // .avi
+    "video/x-matroska", // .mkv
+    // Common Audio Types (link-only)
+    "audio/aac",
+    "audio/mpeg", // .mp3
+    "audio/wav",
+    "audio/ogg",
+    "audio/flac",
+    // Common Compressed Types (link-only)
+    "application/zip",
+    "application/vnd.rar",
+    "application/x-7z-compressed",
+    "application/gzip",
+    "application/x-bzip2",
+    "application/x-tar",
+    "application/java-archive", // .jar
+    "application/epub+zip",
 ];
 export const MIME_TYPE_TO_EXTENSION = {
     // Google App Types
@@ -43,6 +66,25 @@ export const MIME_TYPE_TO_EXTENSION = {
     "image/jpeg": "jpg",
     "image/png": "png",
     "image/svg+xml": "svg",
+    // Video, Audio, and Compressed file types (often treated as link-only)
+    "application/vnd.google-apps.video": "video",
+    "video/mp4": "mp4",
+    "video/mpeg": "mpeg",
+    "video/quicktime": "mov",
+    "video/webm": "webm",
+    "video/x-msvideo": "avi",
+    "video/x-matroska": "mkv",
+    "audio/aac": "aac",
+    "audio/mpeg": "mp3",
+    "audio/wav": "wav",
+    "audio/ogg": "ogg",
+    "audio/flac": "flac",
+    "application/vnd.rar": "rar",
+    "application/x-7z-compressed": "7z",
+    "application/gzip": "gz",
+    "application/x-bzip2": "bz2",
+    "application/x-tar": "tar",
+    "application/java-archive": "jar",
     // Notebooks
     "application/vnd.google.colaboratory": "ipynb",
 };
@@ -51,8 +93,8 @@ export const MIME_TYPE_TO_EXTENSION = {
 // AND other office/exportable types (link + content) if we want visual diffs for them.
 export const LINK_FILE_MIME_TYPES = [
     ...GOOGLE_DOC_MIME_TYPES, // Create link files for Google types (no content download)
-    ...GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES.filter(type => !GOOGLE_DOC_MIME_TYPES.includes(type)), // Add exportable types like DOCX, PPTX etc. (link + content download)
-    NATIVE_PDF_TYPE // Ensure native PDF is included (link + content download)
+    ...GOOGLE_DRIVE_EXPORTABLE_TO_PDF_TYPES.filter((type) => !GOOGLE_DOC_MIME_TYPES.includes(type)), // Add exportable types like DOCX, PPTX etc. (link + content download)
+    NATIVE_PDF_TYPE, // Ensure native PDF is included (link + content download)
 ];
 /**
  * Gets the type-specific extension suffix for a link file (e.g., ".doc.gdrive.json").
@@ -61,9 +103,9 @@ export const LINK_FILE_MIME_TYPES = [
  */
 function get_link_type_suffix(mime_type) {
     if (!mime_type)
-        return '.gdrive.json'; // Fallback for unknown type
+        return ".gdrive.json"; // Fallback for unknown type
     const extension = MIME_TYPE_TO_EXTENSION[mime_type];
-    return extension ? `.${extension}.gdrive.json` : '.gdrive.json';
+    return extension ? `.${extension}.gdrive.json` : ".gdrive.json";
 }
 /**
  * Constructs the full unique link file name using the Drive file ID.
@@ -77,7 +119,7 @@ export function construct_link_file_name(base_name, file_id, mime_type) {
     const type_suffix = get_link_type_suffix(mime_type); // Gets e.g., ".doc.gdrive.json"
     // Sanitize base_name slightly (replace multiple dashes potentially caused by ID format) - might need refinement
     // Keep file_id as is, assuming it's URL-safe enough for filenames.
-    const safe_base_name = base_name.replace(/--+/g, '-');
+    const safe_base_name = base_name.replace(/--+/g, "-");
     return `${safe_base_name}--${file_id}${type_suffix}`;
 }
 /**
