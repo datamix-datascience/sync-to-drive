@@ -3,17 +3,17 @@ import * as path from "path";
 import * as fs_promises from "fs/promises"; // Use promises for fs operations
 import { execute_git } from "../git.js";
 import { list_local_files } from "../local-files/list.js";
-import { list_drive_files_recursively } from "../google-drive/list.js";
+import { list_drive_files_recursively, } from "../google-drive/list.js";
 import { handle_download_item } from "../google-drive/files.js";
 import { create_pull_request_with_retry } from "../github/pull-requests.js";
 import { octokit } from "../github/auth.js";
 // Import auth object needed for Slides API call
 import { auth as driveAuthClient } from "../google-drive/auth.js"; // Rename import to avoid clash
-import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES, construct_link_file_name } from "../google-drive/file_types.js";
+import { GOOGLE_DOC_MIME_TYPES, LINK_FILE_MIME_TYPES, construct_link_file_name, } from "../google-drive/file_types.js";
 import { format_pr_body } from "./pretty.js";
 // Import Slides fetching and SVG conversion functions
 import { fetch_google_slide_json } from "../google-slides/fetch.js";
-import { generate_slide_svg, write_svg_file } from "../google-slides/slides_to_svg.js";
+import { generate_slide_svg, write_svg_file, } from "../google-slides/slides_to_svg.js";
 // Helper to safely get repo owner and name
 function get_repo_info() {
     const repo_full_name = process.env.GITHUB_REPOSITORY;
@@ -32,23 +32,26 @@ async function determineInitialBranch(repo_info) {
     core.info("Determining initial branch name...");
     try {
         // Attempt 1: Git rev-parse
-        const current_branch_result = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true });
+        const current_branch_result = await execute_git("rev-parse", ["--abbrev-ref", "HEAD"], { silent: true });
         const parsedBranch = current_branch_result.stdout.trim();
-        if (parsedBranch && parsedBranch !== 'HEAD') {
+        if (parsedBranch && parsedBranch !== "HEAD") {
             branchName = parsedBranch;
             core.info(`Determined initial branch from git rev-parse: '${branchName}'`);
             return branchName;
         }
         // Attempt 2: GITHUB_REF
         const ref = process.env.GITHUB_REF;
-        if (ref && ref.startsWith('refs/heads/')) {
-            branchName = ref.substring('refs/heads/'.length);
+        if (ref && ref.startsWith("refs/heads/")) {
+            branchName = ref.substring("refs/heads/".length);
             core.info(`Using branch name from GITHUB_REF: '${branchName}'`);
             return branchName;
         }
         // Attempt 3: GitHub API default branch
         core.info("Falling back to fetching default branch from GitHub API...");
-        const repoData = await octokit.rest.repos.get({ owner: repo_info.owner, repo: repo_info.repo });
+        const repoData = await octokit.rest.repos.get({
+            owner: repo_info.owner,
+            repo: repo_info.repo,
+        });
         branchName = repoData.data.default_branch;
         if (!branchName) {
             throw new Error("GitHub API did not return a default branch name.");
@@ -62,12 +65,12 @@ async function determineInitialBranch(repo_info) {
         throw new Error("Could not determine the initial branch. Action cannot continue.");
     }
 }
-export async function handle_drive_changes(folder_id, on_untrack_action, trigger_event_name, git_user_name, git_user_email) {
+export async function handle_drive_changes(folder_id, trigger_event_name, git_user_name, git_user_email, visual_diff_output_dir) {
     core.info(`Handling potential incoming changes from Drive folder: ${folder_id} for trigger event: ${trigger_event_name}`);
     // If the event is 'push', Git is the source of truth.
     // This function synchronizes Drive changes TO Git.
     // So, for a 'push' event, this function should not perform its usual operations.
-    if (trigger_event_name === 'push') {
+    if (trigger_event_name === "push") {
         core.info("Detected 'push' event. Git is the source of truth.");
         core.info("Skipping Drive-to-Git synchronization logic in 'handle_drive_changes'.");
         // A different function/logic would be needed for Git-to-Drive synchronization.
@@ -75,7 +78,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
     }
     // Original logic for 'schedule', 'workflow_dispatch', etc., where Drive is the source of truth.
     core.info(`Proceeding with Drive-to-Git synchronization for event '${trigger_event_name}'.`);
-    let original_state_branch = '';
+    let original_state_branch = "";
     const repo_info = get_repo_info();
     const run_id = process.env.GITHUB_RUN_ID || Date.now().toString();
     let result = {};
@@ -92,14 +95,21 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         // Step 1: Create temporary state branch
         original_state_branch = `original-state-${folder_id}-${run_id}`;
         core.info(`Initial branch is '${initial_branch}'. Creating temporary state branch '${original_state_branch}'`);
-        const initial_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim();
+        const initial_commit_hash = (await execute_git("rev-parse", ["HEAD"], { silent: true })).stdout.trim();
         if (!initial_commit_hash)
             throw new Error("Could not get initial commit hash.");
-        await execute_git("checkout", ["-b", original_state_branch, initial_commit_hash]);
+        await execute_git("checkout", [
+            "-b",
+            original_state_branch,
+            initial_commit_hash,
+        ]);
         // Step 2: List local files from original state
         core.info("Listing local files from original state branch...");
         const initial_local_files_list = await list_local_files(".");
-        const initial_local_map = new Map(initial_local_files_list.map(f => [f.relative_path.replace(/\\/g, '/'), f]));
+        const initial_local_map = new Map(initial_local_files_list.map((f) => [
+            f.relative_path.replace(/\\/g, "/"),
+            f,
+        ]));
         core.info(`Found ${initial_local_map.size} relevant local files in original state.`);
         // Step 3: List Drive content (Using the modified function)
         core.info("Listing Drive content...");
@@ -116,20 +126,21 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             return result;
         }
         // --- Step 4: Determine Expected Local State & Identify Changes ---
-        core.startGroup('Determining Expected State and Changes');
+        core.startGroup("Determining Expected State and Changes");
         // Map of expected *local* relative paths to the DriveItem causing them
         const expected_local_files = new Map(); // Added 'svg' type
         // Store DriveItems that require a file system operation (add/update)
         const drive_items_needing_processing = new Map();
         // Populate expected_local_files based on the drive_files_with_paths array
-        for (const { path: drive_path, item: drive_item } of drive_files_with_paths) { // <-- Iterate the array
+        for (const { path: drive_path, item: drive_item, } of drive_files_with_paths) {
+            // <-- Iterate the array
             if (!drive_item.id || !drive_item.name || !drive_item.mimeType) {
-                core.warning(`Skipping Drive item with missing id, name, or mimeType. Path: '${drive_path}', ID: ${drive_item.id || 'N/A'}`);
+                core.warning(`Skipping Drive item with missing id, name, or mimeType. Path: '${drive_path}', ID: ${drive_item.id || "N/A"}`);
                 continue;
             }
             // Removed duplicate detection logic
             const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType);
-            const is_google_slide = drive_item.mimeType === 'application/vnd.google-apps.presentation';
+            const is_google_slide = drive_item.mimeType === "application/vnd.google-apps.presentation";
             const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType);
             // 1. Determine Expected Content Path (usually the drive_path, represents the binary/downloadable version if applicable)
             const expected_content_path = drive_path; // Use the path calculated during listing
@@ -141,48 +152,65 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 // Construct the unique link file name using the new function
                 const link_filename = construct_link_file_name(base_name, drive_item.id, drive_item.mimeType);
                 // Calculate the link file path relative to the root
-                expected_link_path = drive_dir === '.' ? link_filename : path.join(drive_dir, link_filename).replace(/\\/g, '/');
+                expected_link_path =
+                    drive_dir === "."
+                        ? link_filename
+                        : path.join(drive_dir, link_filename).replace(/\\/g, "/");
             }
             // 3. Determine Expected SVG path (if it's a Google Slide)
             let expected_svg_path = null;
             if (is_google_slide && expected_link_path) {
-                // Derive SVG path from link path, then prepend _diff_ directory
-                const relative_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, '.export.svg');
-                expected_svg_path = path.join('_diff_', relative_svg_path).replace(/\\/g, '/');
+                // Derive SVG path from link path, then prepend visual_diff_output_dir directory
+                const relative_svg_path = expected_link_path.replace(/\.gdrive\.json$/i, ".export.svg");
+                expected_svg_path = path
+                    .join(visual_diff_output_dir, relative_svg_path)
+                    .replace(/\\/g, "/");
             }
             // Add expected *local* files to the map
-            if (!is_google_doc) { // Content file expected for non-Google Docs
+            if (!is_google_doc) {
+                // Content file expected for non-Google Docs
                 if (expected_local_files.has(expected_content_path)) {
                     // This should be rare now unless non-link files somehow clash exactly
                     core.debug(`Duplicate content path mapping detected: ${expected_content_path}. Overwriting with Drive ID ${drive_item.id}.`);
                 }
-                expected_local_files.set(expected_content_path, { type: 'content', driveItem: drive_item });
+                expected_local_files.set(expected_content_path, {
+                    type: "content",
+                    driveItem: drive_item,
+                });
             }
-            if (expected_link_path) { // Link file expected for Google Docs and PDFs (and Slides)
+            if (expected_link_path) {
+                // Link file expected for Google Docs and PDFs (and Slides)
                 if (expected_local_files.has(expected_link_path)) {
                     // This should theoretically NOT happen anymore due to unique file IDs in names
                     core.error(`FATAL: Duplicate link path mapping detected even with file ID in name: ${expected_link_path}. Existing ID: ${expected_local_files.get(expected_link_path)?.driveItem.id}, New ID: ${drive_item.id}. This indicates a logic error.`);
                     // Consider throwing an error or handling this unexpected state
                 }
-                expected_local_files.set(expected_link_path, { type: 'link', driveItem: drive_item });
+                expected_local_files.set(expected_link_path, {
+                    type: "link",
+                    driveItem: drive_item,
+                });
             }
-            if (expected_svg_path) { // SVG file expected for Google Slides
+            if (expected_svg_path) {
+                // SVG file expected for Google Slides
                 if (expected_local_files.has(expected_svg_path)) {
                     // Also should not happen due to unique ID in name derivation
                     core.error(`FATAL: Duplicate SVG path mapping detected: ${expected_svg_path}. Existing ID: ${expected_local_files.get(expected_svg_path)?.driveItem.id}, New ID: ${drive_item.id}.`);
                 }
-                expected_local_files.set(expected_svg_path, { type: 'svg', driveItem: drive_item });
+                expected_local_files.set(expected_svg_path, {
+                    type: "svg",
+                    driveItem: drive_item,
+                });
             }
         }
         core.info(`Calculated ${expected_local_files.size} expected local files (content, links, svgs) based on Drive state.`);
         // Removed duplicate warning log
         // Compare expected state against initial local state to find changes
         // Iterate through the Drive items AGAIN to ensure each one is checked
-        for (const { path: drive_path, item: drive_item } of drive_files_with_paths) {
+        for (const { path: drive_path, item: drive_item, } of drive_files_with_paths) {
             if (!drive_item.id || !drive_item.name || !drive_item.mimeType)
                 continue; // Skip incomplete items
             const is_google_doc = GOOGLE_DOC_MIME_TYPES.includes(drive_item.mimeType);
-            const is_google_slide = drive_item.mimeType === 'application/vnd.google-apps.presentation';
+            const is_google_slide = drive_item.mimeType === "application/vnd.google-apps.presentation";
             const needs_link_file = LINK_FILE_MIME_TYPES.includes(drive_item.mimeType);
             let item_needs_update = false; // Flag if *this specific* drive item triggers an update
             let update_reasons = [];
@@ -191,7 +219,8 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 const expected_content_path = drive_path;
                 const expected_content_info = expected_local_files.get(expected_content_path);
                 // Ensure the mapping points back to the *current* drive_item ID
-                if (expected_content_info && expected_content_info.driveItem.id === drive_item.id) {
+                if (expected_content_info &&
+                    expected_content_info.driveItem.id === drive_item.id) {
                     const local_file_info = initial_local_map.get(expected_content_path);
                     let needs_update = false;
                     let reason = "";
@@ -200,7 +229,8 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                         reason = `Content file missing locally`;
                     }
                     else {
-                        if (expected_content_info.driveItem.hash && local_file_info.hash !== expected_content_info.driveItem.hash) {
+                        if (expected_content_info.driveItem.hash &&
+                            local_file_info.hash !== expected_content_info.driveItem.hash) {
                             needs_update = true;
                             reason = `Content hash mismatch`;
                         }
@@ -209,15 +239,19 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                             // Calculate the EXPECTED link path using the NEW function
                             const base_name = drive_item.name;
                             const drive_dir = path.dirname(drive_path);
-                            const expected_link_path_for_content = drive_dir === '.'
+                            const expected_link_path_for_content = drive_dir === "."
                                 ? construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)
-                                : path.join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)).replace(/\\/g, '/');
+                                : path
+                                    .join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType))
+                                    .replace(/\\/g, "/");
                             const corresponding_link_expected = expected_local_files.get(expected_link_path_for_content);
-                            if (corresponding_link_expected?.type === 'link' && corresponding_link_expected.driveItem.id === drive_item.id) {
+                            if (corresponding_link_expected?.type === "link" &&
+                                corresponding_link_expected.driveItem.id === drive_item.id) {
                                 const local_link_info = initial_local_map.get(expected_link_path_for_content);
                                 if (!local_link_info) {
                                     needs_update = true;
-                                    reason = "Corresponding link file missing locally for timestamp check";
+                                    reason =
+                                        "Corresponding link file missing locally for timestamp check";
                                 }
                                 else {
                                     try {
@@ -250,13 +284,16 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 // Calculate the EXPECTED link path using the NEW function
                 const base_name = drive_item.name;
                 const drive_dir = path.dirname(drive_path);
-                const expected_link_path = drive_dir === '.'
+                const expected_link_path = drive_dir === "."
                     ? construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)
-                    : path.join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)).replace(/\\/g, '/');
+                    : path
+                        .join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType))
+                        .replace(/\\/g, "/");
                 const expected_link_info = expected_local_files.get(expected_link_path);
                 // No need to check for duplicates here anymore, the check is implicit in the map lookup
                 // Ensure the mapping points back to the *current* drive_item ID
-                if (expected_link_info && expected_link_info.driveItem.id === drive_item.id) {
+                if (expected_link_info &&
+                    expected_link_info.driveItem.id === drive_item.id) {
                     const local_file_info = initial_local_map.get(expected_link_path);
                     let needs_update = false;
                     let reason = "";
@@ -292,15 +329,20 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                 // This is used to check the modifiedTime for the slide.
                 const base_name = drive_item.name;
                 const drive_dir = path.dirname(drive_path); // Directory of the original Drive item (e.g., "Slides")
-                const actual_link_file_path = drive_dir === '.'
+                const actual_link_file_path = drive_dir === "."
                     ? construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)
-                    : path.join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType)).replace(/\\/g, '/');
+                    : path
+                        .join(drive_dir, construct_link_file_name(base_name, drive_item.id, drive_item.mimeType))
+                        .replace(/\\/g, "/");
                 // Calculate the EXPECTED SVG path (e.g., "_diff_/Slides/My Presentation.export.svg")
-                const relative_svg_filename = actual_link_file_path.replace(/\.gdrive\.json$/i, '.export.svg');
-                const expected_svg_path = path.join('_diff_', relative_svg_filename).replace(/\\/g, '/');
+                const relative_svg_filename = actual_link_file_path.replace(/\.gdrive\.json$/i, ".export.svg");
+                const expected_svg_path = path
+                    .join(visual_diff_output_dir, relative_svg_filename)
+                    .replace(/\\/g, "/");
                 const expected_svg_info = expected_local_files.get(expected_svg_path);
                 // Ensure the mapping points back to the *current* drive_item ID
-                if (expected_svg_info && expected_svg_info.driveItem.id === drive_item.id) {
+                if (expected_svg_info &&
+                    expected_svg_info.driveItem.id === drive_item.id) {
                     const local_svg_info = initial_local_map.get(expected_svg_path);
                     let needs_update = false;
                     let reason = "";
@@ -313,11 +355,13 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                         // Check if the corresponding *link file* indicates a modified time change,
                         // as we don't have a hash for the SVG itself.
                         const corresponding_link_expected = expected_local_files.get(actual_link_file_path);
-                        if (corresponding_link_expected?.type === 'link' && corresponding_link_expected.driveItem.id === drive_item.id) {
+                        if (corresponding_link_expected?.type === "link" &&
+                            corresponding_link_expected.driveItem.id === drive_item.id) {
                             const local_link_info = initial_local_map.get(actual_link_file_path);
                             if (!local_link_info) {
                                 needs_update = true;
-                                reason = "Corresponding link file missing locally (for timestamp check)";
+                                reason =
+                                    "Corresponding link file missing locally (for timestamp check)";
                             }
                             else {
                                 try {
@@ -337,7 +381,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                         else {
                             core.debug(`Could not find corresponding link file (${actual_link_file_path}) to check modifiedTime for SVG (${expected_svg_path}). Assuming update needed if link changed.`);
                             // If the link file itself needed an update (checked in block B), that's enough reason to update the SVG too.
-                            if (update_reasons.some(r => r.startsWith(`Link file '${actual_link_file_path}'`))) {
+                            if (update_reasons.some((r) => r.startsWith(`Link file '${actual_link_file_path}'`))) {
                                 needs_update = true;
                                 reason = `SVG update triggered by corresponding link file change`;
                             }
@@ -351,13 +395,13 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             }
             // D. Add to processing list if *this* Drive item triggered an update
             if (item_needs_update) {
-                core.info(` -> Change detected for Drive item: ${drive_item.name} (ID: ${drive_item.id}, Path: ${drive_path}). Reasons: ${update_reasons.join('; ')}`);
+                core.info(` -> Change detected for Drive item: ${drive_item.name} (ID: ${drive_item.id}, Path: ${drive_path}). Reasons: ${update_reasons.join("; ")}`);
                 // Target path for handle_download_item is the *conceptual* content path based on Drive structure
                 const targetContentPath = drive_path;
                 if (!drive_items_needing_processing.has(drive_item.id)) {
                     drive_items_needing_processing.set(drive_item.id, {
                         driveItem: drive_item,
-                        targetContentPath: targetContentPath
+                        targetContentPath: targetContentPath,
                     });
                 }
                 // Also add to list for PR body (using Set to avoid duplicates)
@@ -379,7 +423,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         const initial_local_dirs = new Set();
         initial_local_map.forEach((_, local_path) => {
             let dir = path.dirname(local_path);
-            while (dir && dir !== '.') {
+            while (dir && dir !== ".") {
                 initial_local_dirs.add(dir);
                 dir = path.dirname(dir);
             }
@@ -387,8 +431,9 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         // Get all unique directory paths from the expected local map
         const expected_local_dirs = new Set();
         expected_local_files.forEach((_, expected_path) => {
+            // Use the expected_local_files map
             let dir = path.dirname(expected_path);
-            while (dir && dir !== '.') {
+            while (dir && dir !== ".") {
                 expected_local_dirs.add(dir);
                 dir = path.dirname(dir);
             }
@@ -414,19 +459,25 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         core.info(`Identified ${local_paths_identified_for_deletion.size} local paths/folders for deletion.`);
         core.endGroup();
         // --- Step 5: Apply File System Changes ---
-        core.startGroup('Applying File System Changes');
+        core.startGroup("Applying File System Changes");
         let changes_applied = false;
         // 5a. Apply Deletions
         if (local_paths_identified_for_deletion.size > 0) {
             // Sort paths: deeper paths first for safe deletion
-            const sorted_deletion_paths = Array.from(local_paths_identified_for_deletion).sort((a, b) => b.split(path.sep).length - a.split(path.sep).length || a.localeCompare(b));
+            const sorted_deletion_paths = Array.from(local_paths_identified_for_deletion).sort((a, b) => b.split(path.sep).length - a.split(path.sep).length ||
+                a.localeCompare(b));
             core.info(`Applying ${sorted_deletion_paths.length} deletions...`);
             for (const local_path_to_delete of sorted_deletion_paths) {
                 try {
-                    const stats = await fs_promises.lstat(local_path_to_delete).catch(() => null);
+                    const stats = await fs_promises
+                        .lstat(local_path_to_delete)
+                        .catch(() => null);
                     if (stats) {
                         core.info(`   - Removing: ${local_path_to_delete}`);
-                        await fs_promises.rm(local_path_to_delete, { recursive: true, force: true });
+                        await fs_promises.rm(local_path_to_delete, {
+                            recursive: true,
+                            force: true,
+                        });
                         changes_applied = true;
                     }
                     else {
@@ -441,13 +492,13 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         // 5b. Apply Additions/Updates
         if (drive_items_needing_processing.size > 0) {
             core.info(`Applying ${drive_items_needing_processing.size} additions/updates...`);
-            for (const { driveItem, targetContentPath } of drive_items_needing_processing.values()) {
+            for (const { driveItem, targetContentPath, } of drive_items_needing_processing.values()) {
                 core.info(`   - Processing Drive item: ${driveItem.name || `(ID: ${driveItem.id})`} -> Target local content path: ${targetContentPath}`);
                 try {
                     await handle_download_item(driveItem, targetContentPath);
                     changes_applied = true; // Assume change if download attempted
                     // *** NEW: SVG Generation for Google Slides ***
-                    if (driveItem.mimeType === 'application/vnd.google-apps.presentation') {
+                    if (driveItem.mimeType === "application/vnd.google-apps.presentation") {
                         core.info(`   -> Item is Google Slides. Attempting SVG generation...`);
                         // 1. Fetch Slides JSON content using the specific function and auth client
                         const presentation_json = await fetch_google_slide_json(driveAuthClient, driveItem.id);
@@ -459,12 +510,14 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
                                 //    targetContentPath is like "SubDir/MyPresentation" (no extension, from Drive structure)
                                 const base_name = driveItem.name; // "MyPresentation"
                                 const link_file_base_name = construct_link_file_name(base_name, driveItem.id, driveItem.mimeType); // "MyPresentation_id.gslides.gdrive.json"
-                                const svg_file_base_name = link_file_base_name.replace(/\.gdrive\.json$/i, '.export.svg'); // "MyPresentation_id.gslides.export.svg"
+                                const svg_file_base_name = link_file_base_name.replace(/\.gdrive\.json$/i, ".export.svg"); // "MyPresentation_id.gslides.export.svg"
                                 // Get the directory of the original item, relative to the sync root (e.g., "SubDir" or ".")
                                 const relative_item_dir = path.dirname(targetContentPath);
-                                // Construct the final path within the _diff_ folder
-                                // If relative_item_dir is ".", path.join will correctly place svg_file_base_name directly under _diff_
-                                const output_svg_path = path.join('_diff_', relative_item_dir, svg_file_base_name).replace(/\\/g, '/');
+                                // Construct the final path within the visual_diff_output_dir folder
+                                // If relative_item_dir is ".", path.join will correctly place svg_file_base_name directly under visual_diff_output_dir
+                                const output_svg_path = path
+                                    .join(visual_diff_output_dir, relative_item_dir, svg_file_base_name)
+                                    .replace(/\\/g, "/");
                                 // 4. Ensure directory exists and Write SVG file
                                 const output_svg_dir = path.dirname(output_svg_path);
                                 await fs_promises.mkdir(output_svg_dir, { recursive: true }); // Ensures _diff_ and any subdirectories are created
@@ -490,14 +543,25 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         if (!changes_applied) {
             core.info("No file system changes were applied. Checking Git status anyway.");
         }
-        core.startGroup('Committing Changes and Creating PR');
+        core.startGroup("Committing Changes and Creating PR");
         // *** ADDED DEBUGGING ***
         core.info("Checking filesystem status before staging...");
         // List files verbosely to see exactly what exists before 'git add'
-        await execute_git('ls', ['-laR'], { silent: false, ignoreReturnCode: true }); // Use 'dir /s /b' on Windows if needed
+        await execute_git("ls", ["-laR"], {
+            silent: false,
+            ignoreReturnCode: true,
+        }); // Use 'dir /s /b' on Windows if needed
         // *** END ADDED DEBUGGING ***
-        await execute_git("config", ["--local", "user.email", git_user_email || "github-actions[bot]@users.noreply.github.com"]);
-        await execute_git("config", ["--local", "user.name", git_user_name || "github-actions[bot]"]);
+        await execute_git("config", [
+            "--local",
+            "user.email",
+            git_user_email || "github-actions[bot]@users.noreply.github.com",
+        ]);
+        await execute_git("config", [
+            "--local",
+            "user.name",
+            git_user_name || "github-actions[bot]",
+        ]);
         core.info("Staging all detected changes...");
         await execute_git("add", ["."]);
         await execute_git("add", ["-u"]);
@@ -505,7 +569,7 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         core.info("Checking Git status *after* staging:");
         await execute_git("status", [], { silent: false }); // Display full status
         // *** END ADDED DEBUGGING ***
-        const status_result = await execute_git('status', ['--porcelain']);
+        const status_result = await execute_git("status", ["--porcelain"]);
         // Log status output regardless of whether it's empty, for debugging
         core.debug("Git status --porcelain output:\n" + status_result.stdout);
         // Removed duplicate check from this condition
@@ -520,33 +584,35 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         const commit_detail_lines = [];
         // Use drive_items_for_pr_body for Added/Updated list
         const added_updated_display = drive_items_for_pr_body // <-- Use the list collected earlier
-            .map(item => item.name || item.id)
+            .map((item) => item.name || item.id)
             .sort((a, b) => a.localeCompare(b));
         if (added_updated_display.length > 0)
-            commit_detail_lines.push(`- Add/Update (from Drive): ${added_updated_display.map(p => `'${p}'`).join(", ")}`);
+            commit_detail_lines.push(`- Add/Update (from Drive): ${added_updated_display.map((p) => `'${p}'`).join(", ")}`);
         const removed_display_paths = Array.from(local_paths_identified_for_deletion).sort((a, b) => a.localeCompare(b));
         if (removed_display_paths.length > 0)
-            commit_detail_lines.push(`- Remove (local paths): ${removed_display_paths.map(p => `'${p}'`).join(", ")}`);
+            commit_detail_lines.push(`- Remove (local paths): ${removed_display_paths.map((p) => `'${p}'`).join(", ")}`);
         // Removed addition of duplicate info to commit message
         const commit_message = [
             `Sync changes from Google Drive (${folder_id})`,
-            ...(commit_detail_lines.length > 0 ? commit_detail_lines : ["- No file content changes detected."]), // Ensure commit body isn't empty if only deletions happened
+            ...(commit_detail_lines.length > 0
+                ? commit_detail_lines
+                : ["- No file content changes detected."]), // Ensure commit body isn't empty if only deletions happened
             `\nSource Drive Folder ID: ${folder_id}`,
-            `Workflow Run ID: ${run_id}`
+            `Workflow Run ID: ${run_id}`,
         ].join("\n");
         try {
             // Only commit if there are actual file changes (status is not clean)
             // This condition is implicitly handled now by the early return above if status is clean
             core.info("Committing staged changes on temporary branch...");
             await execute_git("commit", ["-m", commit_message]);
-            const sync_commit_hash = (await execute_git('rev-parse', ['HEAD'], { silent: true })).stdout.trim(); // Get HEAD SHA of the new commit
+            const sync_commit_hash = (await execute_git("rev-parse", ["HEAD"], { silent: true })).stdout.trim(); // Get HEAD SHA of the new commit
             core.info(`Created sync commit ${sync_commit_hash} on temporary branch '${original_state_branch}'.`);
-            const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const sanitized_folder_id = folder_id.replace(/[^a-zA-Z0-9_-]/g, "_");
             const head_branch = `sync-from-drive-${sanitized_folder_id}`;
             result.head_branch = head_branch;
             core.info(`Preparing PR branch: ${head_branch}`);
-            const local_branch_exists_check = await execute_git('show-ref', ['--verify', `refs/heads/${head_branch}`], { ignoreReturnCode: true, silent: true });
-            const remote_branch_exists_check = await execute_git('ls-remote', ['--exit-code', '--heads', 'origin', head_branch], { ignoreReturnCode: true, silent: true });
+            const local_branch_exists_check = await execute_git("show-ref", ["--verify", `refs/heads/${head_branch}`], { ignoreReturnCode: true, silent: true });
+            const remote_branch_exists_check = await execute_git("ls-remote", ["--exit-code", "--heads", "origin", head_branch], { ignoreReturnCode: true, silent: true });
             let branch_creation_needed = true; // Assume needed unless reset below
             if (local_branch_exists_check.exitCode === 0) {
                 core.info(`Branch ${head_branch} exists locally. Checking it out and resetting...`);
@@ -557,7 +623,10 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             else if (remote_branch_exists_check.exitCode === 0) {
                 core.info(`Branch ${head_branch} exists remotely. Fetching, checking out, and resetting...`);
                 try {
-                    await execute_git("fetch", ["origin", `${head_branch}:${head_branch}`]);
+                    await execute_git("fetch", [
+                        "origin",
+                        `${head_branch}:${head_branch}`,
+                    ]);
                     await execute_git("checkout", ["--force", head_branch]);
                     await execute_git("reset", ["--hard", sync_commit_hash]); // Reset to the sync commit
                     branch_creation_needed = false;
@@ -579,9 +648,15 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
             const pr_title = `Sync changes from Google Drive (${folder_id})`;
             // Remove duplicates argument from format_pr_body call
             const pr_body = format_pr_body(folder_id, run_id, drive_items_for_pr_body, // Added/Updated items
-            local_paths_identified_for_deletion // Removed paths
-            );
-            const pr_params = { owner: repo_info.owner, repo: repo_info.repo, title: pr_title, head: head_branch, base: initial_branch, body: pr_body };
+            local_paths_identified_for_deletion);
+            const pr_params = {
+                owner: repo_info.owner,
+                repo: repo_info.repo,
+                title: pr_title,
+                head: head_branch,
+                base: initial_branch,
+                body: pr_body,
+            };
             core.info(`Attempting to create or update Pull Request: ${pr_title} (${head_branch} -> ${initial_branch})`);
             const pr_result = await create_pull_request_with_retry(octokit, pr_params);
             if (pr_result) {
@@ -611,20 +686,20 @@ export async function handle_drive_changes(folder_id, on_untrack_action, trigger
         core.startGroup(`Cleaning up Git State`);
         core.info(`Cleaning up temporary branch '${original_state_branch}' and returning to '${initial_branch}'`);
         try {
-            const current_cleanup_branch_result = await execute_git('rev-parse', ['--abbrev-ref', 'HEAD'], { silent: true, ignoreReturnCode: true });
+            const current_cleanup_branch_result = await execute_git("rev-parse", ["--abbrev-ref", "HEAD"], { silent: true, ignoreReturnCode: true });
             const current_cleanup_branch = current_cleanup_branch_result.stdout.trim();
             if (current_cleanup_branch !== initial_branch && initial_branch) {
-                core.info(`Currently on branch '${current_cleanup_branch || 'detached HEAD'}', checking out initial branch '${initial_branch}'...`);
+                core.info(`Currently on branch '${current_cleanup_branch || "detached HEAD"}', checking out initial branch '${initial_branch}'...`);
                 await execute_git("checkout", ["--force", initial_branch]);
             }
             else if (current_cleanup_branch === initial_branch) {
                 core.info(`Already on initial branch '${initial_branch}'.`);
             }
             else {
-                core.warning(`Could not determine initial branch for cleanup checkout. Staying on '${current_cleanup_branch || 'detached HEAD'}'`);
+                core.warning(`Could not determine initial branch for cleanup checkout. Staying on '${current_cleanup_branch || "detached HEAD"}'`);
             }
             if (original_state_branch) {
-                const branch_check = await execute_git('show-ref', ['--verify', `refs/heads/${original_state_branch}`], { ignoreReturnCode: true, silent: true });
+                const branch_check = await execute_git("show-ref", ["--verify", `refs/heads/${original_state_branch}`], { ignoreReturnCode: true, silent: true });
                 if (branch_check.exitCode === 0) {
                     core.info(`Deleting temporary state branch '${original_state_branch}'...`);
                     await execute_git("branch", ["-D", original_state_branch]);

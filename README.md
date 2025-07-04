@@ -20,7 +20,7 @@ Synchronizes files between a GitHub repository and Google Drive folder(s) using 
     *   Lists current Drive content.
     *   Compares Drive state to the repository's base branch state.
     *   Creates/updates a Pull Request on a dedicated branch (`sync-from-drive-<folderId>`) proposing these changes:
-        *   New/modified Drive files result in downloaded content or updated `.gdrive.json` link files.
+        *   New/modified Drive files result in downloaded content or updated `.gdrive.json` link files. For Google Slides, an `.export.svg` file is also generated in the `visual_diff_output_dir` to provide a readable preview.
         *   Local files/folders (not ignored) absent from Drive are staged for removal.
         *   The PR description details *these* primary sync changes.
 6.  **Visual Diff Generation (Optional, All triggers, if PR exists/updated):**
@@ -68,7 +68,7 @@ Place `sync.json` in your repository root.
 -   `trigger_event_name` (**required**): Trigger event name (e.g., `${{ github.event_name }}`).
 -   `config_path` (optional): Path to `sync.json`. Default: `./sync.json`.
 -   `enable_visual_diffs` (optional): `true` to enable PNG generation. Default: `false`.
--   `visual_diff_output_dir` (optional): Base directory for PNGs. Default: `_diff_`.
+-   `visual_diff_output_dir` (optional): Base directory for generated preview files (PNGs from visual diffs, SVGs from Google Slides). Default: `_diff_`.
 -   `visual_diff_link_suffix` (optional): Suffix of link files for diffing. Default: `.gdrive.json`.
 -   `visual_diff_dpi` (optional): Resolution for generated PNGs. Default: `72`.
 -   `git_user_name` (optional): Git user name for commits. Default: `github-actions[bot]`.

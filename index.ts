@@ -44,7 +44,7 @@ const visual_diff_link_suffix =
   ".gdrive.json"; // Default suffix matching our creation logic
 const visual_diff_dpi = parseInt(
   core.getInput("visual_diff_dpi", { required: false }) || "72",
-  10
+  10,
 ); // Default DPI
 const git_user_name =
   core.getInput("git_user_name", { required: false }) || "github-actions[bot]";
@@ -69,15 +69,15 @@ interface GDriveLinkData {
 // Matches: "basename--ID.type.gdrive.json"
 // e.g., "Report--XYZ123.doc.gdrive.json"
 const known_extensions_regex_part = Object.values(MIME_TYPE_TO_EXTENSION).join(
-  "|"
+  "|",
 );
 // Be careful with paths containing '--' in the base name itself. The regex needs to be somewhat specific.
 // It looks for '--', then likely ID chars (alphanumeric, -, _), then a dot, known extension, then the final suffix.
 const LINK_FILE_REGEX = new RegExp(
   `--[a-zA-Z0-9_-]+\\.(${known_extensions_regex_part})${visual_diff_link_suffix.replace(
     ".",
-    "\\."
-  )}$`
+    "\\.",
+  )}$`,
 );
 
 // STEP 0: Define function to parse link files and create mapping
@@ -91,7 +91,7 @@ const LINK_FILE_REGEX = new RegExp(
  */
 async function create_link_file_data_map(
   local_files: FileInfo[],
-  link_file_regex: RegExp
+  link_file_regex: RegExp,
 ): Promise<Map<string, { drive_id: string; drive_modified_time: string }>> {
   const link_data_map = new Map<
     string,
@@ -120,18 +120,18 @@ async function create_link_file_data_map(
             drive_modified_time: data.modifiedTime,
           });
           core.debug(
-            `    -> Found link data for Drive path '${normalized_drive_path}': ID=${data.id}, ModifiedTime=${data.modifiedTime}`
+            `    -> Found link data for Drive path '${normalized_drive_path}': ID=${data.id}, ModifiedTime=${data.modifiedTime}`,
           );
         } else {
           core.warning(
-            `Skipping link file '${file.relative_path}' due to missing 'id', 'modifiedTime', or 'name' fields in JSON content.`
+            `Skipping link file '${file.relative_path}' due to missing 'id', 'modifiedTime', or 'name' fields in JSON content.`,
           );
         }
       } catch (error) {
         core.warning(
           `Failed to read or parse link file '${file.relative_path}': ${
             (error as Error).message
-          }`
+          }`,
         );
       }
     }
@@ -157,19 +157,19 @@ async function sync_main() {
     if (isNaN(visual_diff_dpi) || visual_diff_dpi <= 0) {
       core.setFailed(
         `Invalid visual_diff_dpi: ${core.getInput(
-          "visual_diff_dpi"
-        )}. Must be a positive number.`
+          "visual_diff_dpi",
+        )}. Must be a positive number.`,
       );
       return;
     }
     if (!visual_diff_link_suffix.startsWith(".")) {
       core.setFailed(
-        `Invalid visual_diff_link_suffix: "${visual_diff_link_suffix}". Should start with a dot.`
+        `Invalid visual_diff_link_suffix: "${visual_diff_link_suffix}". Should start with a dot.`,
       );
       return;
     }
     core.info(
-      `Visual Diff Settings: Output Dir='${visual_diff_output_dir}', Link Suffix='${visual_diff_link_suffix}', DPI=${visual_diff_dpi}`
+      `Visual Diff Settings: Output Dir='${visual_diff_output_dir}', Link Suffix='${visual_diff_link_suffix}', DPI=${visual_diff_dpi}`,
     );
   }
 
@@ -177,13 +177,13 @@ async function sync_main() {
     const folder_id = target.drive_folder_id;
     const on_untrack_action = target.on_untrack || "ignore";
     core.startGroup(
-      `Processing Target Drive Folder: ${folder_id} (Untrack Action: ${on_untrack_action})`
+      `Processing Target Drive Folder: ${folder_id} (Untrack Action: ${on_untrack_action})`,
     );
     core.info(
       `Drive URL: ${
         target.drive_url ||
         `https://drive.google.com/drive/folders/${folder_id}`
-      }`
+      }`,
     );
 
     let operation_failed = false; // Track if any critical part fails for this target
@@ -194,7 +194,7 @@ async function sync_main() {
       // *** STEP 1 & 2: Sync Outgoing Changes & Handle Untracked (Push Trigger Only) ***
       if (trigger_event_name === "push") {
         core.info(
-          "Step 1 & 2: Processing outgoing changes and untracked items (push trigger)..."
+          "Step 1 & 2: Processing outgoing changes and untracked items (push trigger)...",
         );
 
         // STEP 1.1: List current local state
@@ -204,10 +204,10 @@ async function sync_main() {
           current_local_files.map((f) => [
             f.relative_path.replace(/\\/g, "/"),
             f,
-          ])
+          ]),
         );
         core.info(
-          `Found ${current_local_map.size} local files for outgoing sync.`
+          `Found ${current_local_map.size} local files for outgoing sync.`,
         );
 
         // STEP 1.2: Parse link files to get last known Drive state (if visual diffs enabled)
@@ -219,7 +219,7 @@ async function sync_main() {
           // Create the map using the new function and the regex
           link_file_data_map = await create_link_file_data_map(
             current_local_files,
-            LINK_FILE_REGEX
+            LINK_FILE_REGEX,
           );
         } else {
           core.info("Skipping link file parsing as visual diffs are disabled.");
@@ -227,7 +227,7 @@ async function sync_main() {
 
         // STEP 1.3: List Drive state ONCE
         core.info(
-          "Listing current Drive content ONCE for comparison and untracked check..."
+          "Listing current Drive content ONCE for comparison and untracked check...",
         );
         let drive_files_map: Map<string, DriveItem>;
         let drive_folders_map: Map<string, DriveItem>;
@@ -241,14 +241,14 @@ async function sync_main() {
             drive_data.files.map((file) => [
               file.path.replace(/\\/g, "/"), // Normalize path to use forward slashes
               file.item, // The DriveItem (file object)
-            ])
+            ]),
           );
           // Create drive_folders_map from drive_data.folders (assuming it's similar)
           drive_folders_map = new Map(
             Array.from(drive_data.folders.entries()).map(([p, item]) => [
               p.replace(/\\/g, "/"),
               item,
-            ])
+            ]),
           );
 
           // Check ownership during initial list processing to optimize Step 3
@@ -266,7 +266,7 @@ async function sync_main() {
                 // Ignore root folder ownership itself
                 initial_list_found_unowned = true;
                 core.debug(
-                  `Found unowned folder: ${item.name} (ID: ${item.id})`
+                  `Found unowned folder: ${item.name} (ID: ${item.id})`,
                 );
                 break; // Found one, no need to check further folders
               }
@@ -275,13 +275,13 @@ async function sync_main() {
           // Set the flag for Step 3 based on this check
           needs_recursive_ownership_check = initial_list_found_unowned;
           core.info(
-            `Initial Drive state: ${drive_files_map.size} files, ${drive_folders_map.size} folders. Needs recursive ownership check: ${needs_recursive_ownership_check}`
+            `Initial Drive state: ${drive_files_map.size} files, ${drive_folders_map.size} folders. Needs recursive ownership check: ${needs_recursive_ownership_check}`,
           );
         } catch (listError) {
           core.error(
             `Failed list Drive content: ${
               (listError as Error).message
-            }. Skipping outgoing sync steps.`
+            }. Skipping outgoing sync steps.`,
           );
           operation_failed = true;
           needs_recursive_ownership_check = true; // Assume check is needed if list fails
@@ -296,13 +296,13 @@ async function sync_main() {
           folder_path_to_id_map = await build_folder_structure(
             folder_id,
             current_local_files,
-            drive_folders_map
+            drive_folders_map,
           ); // Pass existing map
         } catch (structureError) {
           core.error(
             `Failed to build Drive folder structure: ${
               (structureError as Error).message
-            }. Skipping file uploads/updates.`
+            }. Skipping file uploads/updates.`,
           );
           operation_failed = true;
           folder_path_to_id_map = new Map([["", folder_id]]);
@@ -320,13 +320,15 @@ async function sync_main() {
           // Push an async function to the promises array
           uploadPromises.push(
             (async () => {
-              if (local_relative_path.endsWith('.gdrive.json')) {
-                core.debug(` -> Skipping exported JSON file: ${local_relative_path}`);
+              if (local_relative_path.endsWith(".gdrive.json")) {
+                core.debug(
+                  ` -> Skipping exported JSON file: ${local_relative_path}`,
+                );
                 return; // Skip upload/processing for this file type
               }
 
               core.debug(
-                `Processing local file for outgoing sync: ${local_relative_path}`
+                `Processing local file for outgoing sync: ${local_relative_path}`,
               );
               // Check if it's a link file first (these are handled by parsing, not upload)
               if (
@@ -334,7 +336,7 @@ async function sync_main() {
                 LINK_FILE_REGEX.test(local_relative_path)
               ) {
                 core.debug(
-                  ` -> Skipping GDrive link file itself: ${local_relative_path}`
+                  ` -> Skipping GDrive link file itself: ${local_relative_path}`,
                 );
                 // Try to determine the *source* path it corresponds to by parsing its content
                 let source_path: string | null = null;
@@ -353,7 +355,7 @@ async function sync_main() {
                   core.warning(
                     `Could not parse link file ${local_relative_path} to determine source path for untracked logic: ${
                       (parseError as Error).message
-                    }`
+                    }`,
                   );
                 }
                 // Mark the *source* path as processed *if* we could determine it.
@@ -362,7 +364,7 @@ async function sync_main() {
                 if (source_path) {
                   files_processed_for_outgoing.add(source_path);
                   core.debug(
-                    ` -> Marking corresponding Drive path '${source_path}' as processed based on link file.`
+                    ` -> Marking corresponding Drive path '${source_path}' as processed based on link file.`,
                   );
                 }
                 return; // Skip actual upload of the link file
@@ -372,7 +374,7 @@ async function sync_main() {
               files_processed_for_outgoing.add(drive_comparison_path); // Track that we are considering this path for potential upload/update
 
               const existing_drive_file = drive_files_map.get(
-                drive_comparison_path
+                drive_comparison_path,
               );
               const drive_target_name = path.basename(drive_comparison_path);
               const local_dir_path = path.dirname(local_relative_path);
@@ -385,7 +387,7 @@ async function sync_main() {
 
               if (!target_folder_id) {
                 core.warning(
-                  `Could not find target Drive folder ID for local file '${local_relative_path}' (lookup path '${parent_dir_lookup}'). Skipping.`
+                  `Could not find target Drive folder ID for local file '${local_relative_path}' (lookup path '${parent_dir_lookup}'). Skipping.`,
                 );
                 return;
               }
@@ -396,15 +398,15 @@ async function sync_main() {
                 // and if the file exists on Drive with a modification time.
                 if (enable_visual_diffs && existing_drive_file?.modifiedTime) {
                   const link_data = link_file_data_map.get(
-                    drive_comparison_path
+                    drive_comparison_path,
                   );
                   if (link_data?.drive_modified_time) {
                     // Parse timestamps for comparison
                     const drive_mod_time_ms = Date.parse(
-                      existing_drive_file.modifiedTime
+                      existing_drive_file.modifiedTime,
                     );
                     const link_mod_time_ms = Date.parse(
-                      link_data.drive_modified_time
+                      link_data.drive_modified_time,
                     );
 
                     // Perform the check only if both timestamps are valid
@@ -414,7 +416,7 @@ async function sync_main() {
                       drive_mod_time_ms > link_mod_time_ms
                     ) {
                       core.warning(
-                        `[Skip Upload] Drive file '${drive_comparison_path}' (ID: ${existing_drive_file.id}) modified at ${existing_drive_file.modifiedTime} is newer than local sync state recorded at ${link_data.drive_modified_time}.`
+                        `[Skip Upload] Drive file '${drive_comparison_path}' (ID: ${existing_drive_file.id}) modified at ${existing_drive_file.modifiedTime} is newer than local sync state recorded at ${link_data.drive_modified_time}.`,
                       );
                       // Skip the rest of the upload/update logic for this file
                       return;
@@ -423,44 +425,44 @@ async function sync_main() {
                       isNaN(link_mod_time_ms)
                     ) {
                       core.warning(
-                        `Could not parse timestamps for comparison for ${drive_comparison_path}. Drive: ${existing_drive_file.modifiedTime}, Link: ${link_data.drive_modified_time}. Proceeding with default update logic.`
+                        `Could not parse timestamps for comparison for ${drive_comparison_path}. Drive: ${existing_drive_file.modifiedTime}, Link: ${link_data.drive_modified_time}. Proceeding with default update logic.`,
                       );
                     } else {
                       core.debug(
-                        `Drive file is not newer based on link data timestamps. Proceeding with upload/update logic.`
+                        `Drive file is not newer based on link data timestamps. Proceeding with upload/update logic.`,
                       );
                     }
                   } else {
                     core.debug(
-                      `No link file data found for ${drive_comparison_path}. Proceeding with default update logic.`
+                      `No link file data found for ${drive_comparison_path}. Proceeding with default update logic.`,
                     );
                   }
                   core.debug(`--------------------------/`);
                 } else {
                   core.debug(
-                    `Skipping modifiedTime check: Visual diffs disabled or Drive file/time missing.`
+                    `Skipping modifiedTime check: Visual diffs disabled or Drive file/time missing.`,
                   );
                 }
 
                 // STEP 1.5.2: Proceed with upload/update/rename if the modifiedTime check passed or didn't apply
                 if (!existing_drive_file) {
                   core.info(
-                    `[Upload Queue] New file: '${local_relative_path}' to folder ${target_folder_id}.`
+                    `[Upload Queue] New file: '${local_relative_path}' to folder ${target_folder_id}.`,
                   );
                   await upload_file(local_file.path, target_folder_id);
                 } else {
                   // Handle Google Docs (primarily renaming)
                   if (
                     GOOGLE_DOC_MIME_TYPES.includes(
-                      existing_drive_file.mimeType || ""
+                      existing_drive_file.mimeType || "",
                     )
                   ) {
                     core.debug(
-                      ` -> Drive file ${existing_drive_file.id} is a Google Doc type.`
+                      ` -> Drive file ${existing_drive_file.id} is a Google Doc type.`,
                     );
                     if (existing_drive_file.name !== drive_target_name) {
                       core.info(
-                        `[Rename Queue] Google Doc '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}).`
+                        `[Rename Queue] Google Doc '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}).`,
                       );
                       // Note: This rename happens even if the content check was skipped, as it's a metadata change.
                       await drive.files.update({
@@ -488,7 +490,7 @@ async function sync_main() {
                           existing_drive_file.id
                         }). Hash mismatch (Drive: ${
                           existing_drive_file.hash || "N/A"
-                        }, Local: ${local_file.hash}).`
+                        }, Local: ${local_file.hash}).`,
                       );
                       await upload_file(local_file.path, target_folder_id, {
                         id: existing_drive_file.id,
@@ -496,7 +498,7 @@ async function sync_main() {
                       });
                     } else if (drive_file_needs_rename) {
                       core.info(
-                        `[Rename Queue] File '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}). Content hash matches.`
+                        `[Rename Queue] File '${existing_drive_file.name}' to '${drive_target_name}' (ID: ${existing_drive_file.id}). Content hash matches.`,
                       );
                       await drive.files.update({
                         fileId: existing_drive_file.id,
@@ -506,7 +508,7 @@ async function sync_main() {
                       });
                     } else {
                       core.debug(
-                        ` -> File '${local_relative_path}' hash and name match Drive (ID: ${existing_drive_file.id}). No update needed.`
+                        ` -> File '${local_relative_path}' hash and name match Drive (ID: ${existing_drive_file.id}). No update needed.`,
                       );
                     }
                   }
@@ -516,17 +518,17 @@ async function sync_main() {
                 core.error(
                   `Failed processing outgoing file ${local_relative_path}: ${
                     (uploadError as Error).message
-                  }`
+                  }`,
                 );
                 // Optionally mark operation_failed = true here if any upload failure is critical
               }
-            })()
+            })(),
           ); // Immediately invoke the async function
 
           // Simple concurrency limiting
           if (uploadPromises.length >= CONCURRENT_UPLOADS) {
             core.debug(
-              `Waiting for batch of ${CONCURRENT_UPLOADS} uploads to finish...`
+              `Waiting for batch of ${CONCURRENT_UPLOADS} uploads to finish...`,
             );
             await Promise.all(uploadPromises);
             uploadPromises.length = 0; // Reset batch
@@ -535,7 +537,7 @@ async function sync_main() {
         // Wait for any remaining promises in the last batch
         if (uploadPromises.length > 0) {
           core.debug(
-            `Waiting for final batch of ${uploadPromises.length} uploads to finish...`
+            `Waiting for final batch of ${uploadPromises.length} uploads to finish...`,
           );
           await Promise.all(uploadPromises);
         }
@@ -543,36 +545,36 @@ async function sync_main() {
 
         // STEP 1.6: Handle Untracked Files/Folders (using the maps from the single listing)
         core.info(
-          "Handling untracked items in Drive (using initial listing)..."
+          "Handling untracked items in Drive (using initial listing)...",
         );
 
         // Identify Drive files/folders whose paths were NOT marked for processing during the upload/update phase
         const untracked_drive_files = Array.from(
-          drive_files_map.entries()
+          drive_files_map.entries(),
         ).filter(
-          ([drive_path]) => !files_processed_for_outgoing.has(drive_path)
+          ([drive_path]) => !files_processed_for_outgoing.has(drive_path),
         );
 
         const required_folder_paths = new Set(folder_path_to_id_map.keys());
         const untracked_drive_folders = Array.from(
-          drive_folders_map.entries()
+          drive_folders_map.entries(),
         ).filter(
           ([folder_path]) =>
-            folder_path !== "" && !required_folder_paths.has(folder_path)
+            folder_path !== "" && !required_folder_paths.has(folder_path),
         );
 
         core.info(
-          `Found ${untracked_drive_files.length} potentially untracked files and ${untracked_drive_folders.length} potentially untracked folders in Drive.`
+          `Found ${untracked_drive_files.length} potentially untracked files and ${untracked_drive_folders.length} potentially untracked folders in Drive.`,
         );
         core.debug(
           `Files processed (considered for upload/update or skipped as link files): ${Array.from(
-            files_processed_for_outgoing
-          ).join(", ")}`
+            files_processed_for_outgoing,
+          ).join(", ")}`,
         );
         core.debug(
           `Required folder paths from local structure: ${Array.from(
-            required_folder_paths
-          ).join(", ")}`
+            required_folder_paths,
+          ).join(", ")}`,
         );
 
         const all_untracked_items: {
@@ -595,14 +597,14 @@ async function sync_main() {
         if (all_untracked_items.length > 0) {
           if (on_untrack_action === "ignore") {
             core.info(
-              `Ignoring ${all_untracked_items.length} untracked item(s) in Drive as per config.`
+              `Ignoring ${all_untracked_items.length} untracked item(s) in Drive as per config.`,
             );
             all_untracked_items.forEach((u) =>
-              core.debug(` - Ignored untracked: ${u.path} (ID: ${u.item.id})`)
+              core.debug(` - Ignored untracked: ${u.path} (ID: ${u.item.id})`),
             );
           } else {
             core.info(
-              `Processing ${all_untracked_items.length} untracked items based on on_untrack='${on_untrack_action}'...`
+              `Processing ${all_untracked_items.length} untracked items based on on_untrack='${on_untrack_action}'...`,
             );
             // Process untracked items sequentially for clarity, can be parallelized if needed
             for (const {
@@ -615,12 +617,12 @@ async function sync_main() {
                   isFolder ? "folder" : "file"
                 } in Drive: ${untracked_path} (ID: ${
                   untracked_item.id
-                }, Owned: ${untracked_item.owned})`
+                }, Owned: ${untracked_item.owned})`,
               );
 
               if (!untracked_item.owned) {
                 const owner_info = untracked_item.permissions?.find(
-                  (p) => p.role === "owner"
+                  (p) => p.role === "owner",
                 );
                 const current_owner_email = owner_info?.emailAddress;
                 core.warning(
@@ -628,7 +630,7 @@ async function sync_main() {
                     untracked_item.id
                   }) is not owned by the service account (Owner: ${
                     current_owner_email || "unknown"
-                  }).`
+                  }).`,
                 );
                 if (
                   on_untrack_action === "request" &&
@@ -637,30 +639,30 @@ async function sync_main() {
                 ) {
                   await request_ownership_transfer(
                     untracked_item.id,
-                    current_owner_email
+                    current_owner_email,
                   );
                 } else if (on_untrack_action === "remove") {
                   core.warning(
-                    `Cannot remove '${untracked_path}' because it's not owned by the service account. Skipping removal.`
+                    `Cannot remove '${untracked_path}' because it's not owned by the service account. Skipping removal.`,
                   );
                 } else {
                   core.info(
-                    `Ignoring untracked, un-owned item '${untracked_path}' (action: ${on_untrack_action}).`
+                    `Ignoring untracked, un-owned item '${untracked_path}' (action: ${on_untrack_action}).`,
                   );
                 }
               } else {
                 core.info(
-                  `Untracked item '${untracked_path}' is owned by the service account.`
+                  `Untracked item '${untracked_path}' is owned by the service account.`,
                 );
                 if (on_untrack_action === "remove") {
                   await delete_untracked(
                     untracked_item.id,
                     untracked_path,
-                    isFolder
+                    isFolder,
                   );
                 } else if (on_untrack_action === "request") {
                   core.info(
-                    `Untracked item '${untracked_path}' is already owned. No action needed for 'request'.`
+                    `Untracked item '${untracked_path}' is already owned. No action needed for 'request'.`,
                   );
                 }
               }
@@ -668,12 +670,12 @@ async function sync_main() {
           }
         } else {
           core.info(
-            "No untracked items found in Drive based on initial listing."
+            "No untracked items found in Drive based on initial listing.",
           );
         }
       } else {
         core.info(
-          "Step 1 & 2: Skipping outgoing sync (local -> Drive) and untracked handling because trigger event was not 'push'."
+          "Step 1 & 2: Skipping outgoing sync (local -> Drive) and untracked handling because trigger event was not 'push'.",
         );
         // needs_recursive_ownership_check remains true (default) for non-push events
       } // End of 'if trigger_event_name === push'
@@ -682,7 +684,7 @@ async function sync_main() {
       // Optimization: Only run the recursive check if needed (determined during push trigger list)
       if (needs_recursive_ownership_check) {
         core.info(
-          "Step 3: Checking for and accepting pending ownership transfers (recursive check needed)..."
+          "Step 3: Checking for and accepting pending ownership transfers (recursive check needed)...",
         );
         try {
           await accept_ownership_transfers(folder_id); // Start recursive check from root
@@ -690,13 +692,13 @@ async function sync_main() {
           core.error(
             `Error during ownership transfer acceptance: ${
               (acceptError as Error).message
-            }`
+            }`,
           );
           operation_failed = true;
         }
       } else {
         core.info(
-          "Step 3: Skipping recursive ownership transfer check as initial list showed all items owned by service account."
+          "Step 3: Skipping recursive ownership transfer check as initial list showed all items owned by service account.",
         );
       }
 
@@ -704,21 +706,22 @@ async function sync_main() {
       // Always run this, unless a critical error occurred earlier in this target's processing
       if (!operation_failed) {
         core.info(
-          "Step 4: Handling potential incoming changes from Drive (Drive -> Local PR)..."
+          "Step 4: Handling potential incoming changes from Drive (Drive -> Local PR)...",
         );
         // Pass the original trigger event name and the untrack action config
         // Store the result which might contain PR details
         // Note: handle_drive_changes includes its own Drive list and comparison logic, optimized separately
         pr_details = await handle_drive_changes(
           folder_id,
-          on_untrack_action,
+
           trigger_event_name,
           git_user_name,
-          git_user_email
+          git_user_email,
+          visual_diff_output_dir,
         );
       } else {
         core.warning(
-          "Skipping Step 4 (Incoming Changes Check) due to failures in previous steps."
+          "Skipping Step 4 (Incoming Changes Check) due to failures in previous steps.",
         );
       }
 
@@ -730,13 +733,13 @@ async function sync_main() {
         !operation_failed
       ) {
         core.info(
-          "Step 5: Generating visual diffs for the created/updated PR..."
+          "Step 5: Generating visual diffs for the created/updated PR...",
         );
         try {
           let head_sha = github.context.payload.pull_request?.head?.sha;
           if (!head_sha && github.context.eventName === "pull_request") {
             core.warning(
-              "Could not get head SHA directly from PR payload context. Trying to fetch..."
+              "Could not get head SHA directly from PR payload context. Trying to fetch...",
             );
             const pr_data = await octokit.rest.pulls.get({
               owner,
@@ -749,7 +752,7 @@ async function sync_main() {
           // try getting the ref for the head branch
           if (!head_sha && pr_details.head_branch) {
             core.debug(
-              `Could not get head SHA from PR context or direct fetch. Trying ref lookup for branch ${pr_details.head_branch}...`
+              `Could not get head SHA from PR context or direct fetch. Trying ref lookup for branch ${pr_details.head_branch}...`,
             );
             // Ensure the ref is correctly formatted
             const ref_lookup = `heads/${pr_details.head_branch}`;
@@ -765,7 +768,7 @@ async function sync_main() {
               core.warning(
                 `Failed to get ref for ${ref_lookup}: ${
                   (refError as Error).message
-                }`
+                }`,
               );
             }
           }
@@ -774,12 +777,12 @@ async function sync_main() {
             // Final fallback or error if SHA is still missing
             if (github.context.sha) {
               core.warning(
-                `Could not determine specific head SHA for branch ${pr_details.head_branch}. Falling back to GITHUB_SHA: ${github.context.sha}`
+                `Could not determine specific head SHA for branch ${pr_details.head_branch}. Falling back to GITHUB_SHA: ${github.context.sha}`,
               );
               head_sha = github.context.sha;
             } else {
               throw new Error(
-                `Could not determine head SHA for branch ${pr_details.head_branch} or GITHUB_SHA.`
+                `Could not determine head SHA for branch ${pr_details.head_branch} or GITHUB_SHA.`,
               );
             }
           }
@@ -801,18 +804,18 @@ async function sync_main() {
           });
         } catch (diffError) {
           core.error(
-            `Visual diff generation failed: ${(diffError as Error).message}`
+            `Visual diff generation failed: ${(diffError as Error).message}`,
           );
           // Optionally mark target as failed if diffs fail: operation_failed = true;
         }
       } else if (enable_visual_diffs) {
         if (operation_failed) {
           core.info(
-            "Skipping Step 5 (Visual Diffs) because previous steps failed."
+            "Skipping Step 5 (Visual Diffs) because previous steps failed.",
           );
         } else if (!(pr_details.pr_number && pr_details.head_branch)) {
           core.info(
-            "Skipping Step 5 (Visual Diffs) because no PR was created/updated in Step 4."
+            "Skipping Step 5 (Visual Diffs) because no PR was created/updated in Step 4.",
           );
         }
       }
@@ -825,7 +828,7 @@ async function sync_main() {
         !operation_failed
       ) {
         core.info(
-          "Step 6: Comparing slide images and generating PR comment..."
+          "Step 6: Comparing slide images and generating PR comment...",
         );
 
         // Add a 10-second wait before starting Step 6 processing
@@ -836,7 +839,7 @@ async function sync_main() {
         try {
           if (!gemini_api_key) {
             throw new Error(
-              "gemini_api_key is required when enable_slide_compare is true."
+              "gemini_api_key is required when enable_slide_compare is true.",
             );
           }
 
@@ -845,7 +848,7 @@ async function sync_main() {
           process.env.GITHUB_TOKEN = core.getInput("github_token");
           if (!process.env.GITHUB_TOKEN) {
             core.warning(
-              "github_token is not set correctly, slide comparison may fail to access GitHub API"
+              "github_token is not set correctly, slide comparison may fail to access GitHub API",
             );
           } else {
             core.info("GitHub token is properly set for slide comparison");
@@ -863,29 +866,29 @@ async function sync_main() {
             owner,
             repo,
             pr_details.pr_number,
-            visual_diff_output_dir
+            visual_diff_output_dir,
           );
 
           if (changedImageFiles.length > 0) {
             core.info(
-              `Found ${changedImageFiles.length} changed slide images to compare`
+              `Found ${changedImageFiles.length} changed slide images to compare`,
             );
 
             await postSeparatedPRComments(
               owner,
               repo,
               pr_details.pr_number,
-              visual_diff_output_dir
+              visual_diff_output_dir,
             );
             core.info(
-              "Posted separated English and Japanese slide comparison comments to PR"
+              "Posted separated English and Japanese slide comparison comments to PR",
             );
           } else {
             core.info("No slide image changes detected for comparison");
           }
         } catch (compareError) {
           core.error(
-            `Slide comparison failed: ${(compareError as Error).message}`
+            `Slide comparison failed: ${(compareError as Error).message}`,
           );
 
           // Add more detailed error information
@@ -901,11 +904,11 @@ async function sync_main() {
       } else if (enable_slide_compare) {
         if (operation_failed) {
           core.info(
-            "Skipping Step 6 (Slide Comparison) because previous steps failed."
+            "Skipping Step 6 (Slide Comparison) because previous steps failed.",
           );
         } else if (!(pr_details.pr_number && pr_details.head_branch)) {
           core.info(
-            "Skipping Step 6 (Slide Comparison) because no PR was created/updated in Step 4."
+            "Skipping Step 6 (Slide Comparison) because no PR was created/updated in Step 4.",
           );
         }
       }
@@ -914,19 +917,19 @@ async function sync_main() {
       core.error(
         `Unhandled error during sync process for Drive folder ${folder_id}: ${
           (error as Error).message
-        }`
+        }`,
       );
       operation_failed = true; // Mark as failed
     } finally {
       // Output link regardless of success/failure
       core.setOutput(
         `drive_link_${folder_id.replace(/[^a-zA-Z0-9]/g, "_")}`,
-        `https://drive.google.com/drive/folders/${folder_id}`
+        `https://drive.google.com/drive/folders/${folder_id}`,
       );
       core.info(
         `Sync process finished for Drive folder: ${folder_id}${
           operation_failed ? " with errors" : ""
-        }.`
+        }.`,
       );
       core.endGroup(); // End group for this target
     }

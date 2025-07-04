@@ -208,7 +208,7 @@ async function sync_main() {
                 for (const [local_relative_path, local_file] of current_local_map) {
                     // Push an async function to the promises array
                     uploadPromises.push((async () => {
-                        if (local_relative_path.endsWith('.gdrive.json')) {
+                        if (local_relative_path.endsWith(".gdrive.json")) {
                             core.debug(` -> Skipping exported JSON file: ${local_relative_path}`);
                             return; // Skip upload/processing for this file type
                         }
@@ -449,7 +449,7 @@ async function sync_main() {
                 // Pass the original trigger event name and the untrack action config
                 // Store the result which might contain PR details
                 // Note: handle_drive_changes includes its own Drive list and comparison logic, optimized separately
-                pr_details = await handle_drive_changes(folder_id, on_untrack_action, trigger_event_name, git_user_name, git_user_email);
+                pr_details = await handle_drive_changes(folder_id, trigger_event_name, git_user_name, git_user_email, visual_diff_output_dir);
             }
             else {
                 core.warning("Skipping Step 4 (Incoming Changes Check) due to failures in previous steps.");
